@@ -129,3 +129,52 @@ def point_to_polyline_distance(point: Sequence[float], polyline: np.ndarray) -> 
     projection = polyline[:-1] + seg_vec * t[:, None]
     dist = np.hypot(point[0] - projection[:, 0], point[1] - projection[:, 1])
     return float(np.min(dist))
+
+
+# ---------------------------------------------------------------------------
+# Dimension helpers
+
+
+def euclid_len(p1: Sequence[float], p2: Sequence[float]) -> float:
+    """Return the Euclidean distance between two points."""
+    return float(math.hypot(float(p2[0]) - float(p1[0]), float(p2[1]) - float(p1[1])))
+
+
+def angle_deg(vertex: Sequence[float], p1: Sequence[float], p2: Sequence[float]) -> float:
+    """Return the absolute angle between the rays (vertex->p1) and (vertex->p2)."""
+    v1x = float(p1[0]) - float(vertex[0])
+    v1y = float(p1[1]) - float(vertex[1])
+    v2x = float(p2[0]) - float(vertex[0])
+    v2y = float(p2[1]) - float(vertex[1])
+    a1 = math.atan2(v1y, v1x)
+    a2 = math.atan2(v2y, v2x)
+    delta = (a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi
+    return abs(math.degrees(delta))
+
+
+def format_length(length: float, units: str, precision: int) -> str:
+    suffix = f" {units}" if units else ""
+    return f"{length:.{precision}f}{suffix}"
+
+
+def radial_label(radius: float, params: dict | None, style) -> str:
+    """Return a formatted radial label string honoring the style mode."""
+    precision = int(getattr(style, "precision", 2))
+    units = str(getattr(style, "units", ""))
+    mode = getattr(style, "mode", "both")
+    suffix = f" {units}" if units else ""
+
+    parts: list[str] = [f"R={radius:.{precision}f}{suffix}"]
+
+    local_params = _normalize_params(params)
+    circ_pi_a = arc_length(radius, local_params)
+    circ_euclid = 2.0 * math.pi * radius
+
+    if mode == "pi_a":
+        parts.append(f"Cₐ={circ_pi_a:.{precision}f}{suffix}")
+    elif mode == "both":
+        parts.append(f"C={circ_euclid:.{precision}f}{suffix}")
+        if abs(circ_pi_a - circ_euclid) > 10 ** (-precision):
+            parts.append(f"Cₐ={circ_pi_a:.{precision}f}{suffix}")
+    # Euclid mode omits circumference extras
+    return " · ".join(parts)
