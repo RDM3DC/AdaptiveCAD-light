@@ -46,6 +46,7 @@ class Main(QMainWindow):
         self.setStatusBar(bar)
 
         self._mode_label = QLabel("Tool: Select")
+        self._mode_label.setToolTip("Active tool. Change using the toolbar on the left.")
         bar.addPermanentWidget(self._mode_label)
 
         self._status_labels = {
@@ -54,7 +55,14 @@ class Main(QMainWindow):
             "arc_length": QLabel("arc: --"),
             "area":    QLabel("area: --"),
         }
-        for label in self._status_labels.values():
+        status_help = {
+            "radius": "Radius: distance for selected πₐ circle or proxy span.",
+            "pi_a": "Local πₐ value computed with current parameters.",
+            "arc_length": "Arc length of the adaptive circle/curve.",
+            "area": "Area enclosed (when defined for the selection).",
+        }
+        for key, label in self._status_labels.items():
+            label.setToolTip(status_help.get(key, ""))
             bar.addPermanentWidget(label)
 
     def _make_toolbar(self) -> None:
@@ -67,15 +75,17 @@ class Main(QMainWindow):
 
         self._tool_actions = {}
         definitions = (
-            ("select", "Select"),
-            ("piacircle", "PiA Circle"),
-            ("piacurve", "PiA Curve"),
+            ("select", "Select", "Select tool: click shapes to inspect metrics."),
+            ("piacircle", "PiA Circle", "πₐ Circle: first click center, second click sets radius."),
+            ("piacurve", "PiA Curve", "πₐ Curve: click control points, Enter to finish."),
         )
-        for name, text in definitions:
+        for name, text, tip in definitions:
             action = toolbar.addAction(text)
             action.setCheckable(True)
             action.setActionGroup(action_group)
             action.triggered.connect(lambda checked, n=name: self._activate_tool(n, checked))
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
             self._tool_actions[name] = action
 
     def _make_menu(self) -> None:
@@ -84,18 +94,26 @@ class Main(QMainWindow):
 
         export_png_action = file_menu.addAction("Export PNG")
         export_png_action.triggered.connect(lambda: self.canvas.export_png(self))
+        export_png_action.setToolTip("Export a PNG snapshot of the current canvas.")
+        export_png_action.setStatusTip("Export a PNG snapshot of the current canvas.")
 
         export_json_action = file_menu.addAction("Export JSON")
         export_json_action.triggered.connect(lambda: self.canvas.export_json(self))
+        export_json_action.setToolTip("Export a JSON file with shapes, parameters, and settings.")
+        export_json_action.setStatusTip("Export a JSON file with shapes, parameters, and settings.")
 
         # Edit menu: Undo/Redo
         edit_menu = menu_bar.addMenu("&Edit")
         undo_action = edit_menu.addAction("Undo")
         undo_action.setShortcut("Ctrl+Z")
         undo_action.triggered.connect(self.canvas.undo)
+        undo_action.setToolTip("Undo the last drawing or parameter change.")
+        undo_action.setStatusTip("Undo the last drawing or parameter change.")
         redo_action = edit_menu.addAction("Redo")
         redo_action.setShortcut("Ctrl+Y")
         redo_action.triggered.connect(self.canvas.redo)
+        redo_action.setToolTip("Redo the last undone step.")
+        redo_action.setStatusTip("Redo the last undone step.")
 
         # View menu: Snap to Grid toggle
         view_menu = menu_bar.addMenu("&View")
@@ -103,6 +121,8 @@ class Main(QMainWindow):
         self._snap_action.setCheckable(True)
         self._snap_action.triggered.connect(lambda checked: self.canvas.set_snap_to_grid(bool(checked)))
         self._snap_action.setChecked(self.canvas.is_snap_enabled())
+        self._snap_action.setToolTip("Toggle snapping drawing points to the grid.")
+        self._snap_action.setStatusTip("Toggle snapping drawing points to the grid.")
 
     # ------------------------------------------------------------------
     # Event handlers

@@ -59,11 +59,18 @@ class Shape:
 class Controls:
     """Docked parameter sliders that feed the canvas."""
 
+    _DESCRIPTIONS = {
+        "alpha": "Reinforcement α: blend in external bias to πₐ.",
+        "mu": "Decay μ: how fast πₐ relaxes back as radius increases.",
+        "k0": "Curvature seed k₀: base curvature that bends circles/curves.",
+    }
+
     def __init__(self, set_params_cb):
         self._set_params_cb = set_params_cb
         self.dock = QDockWidget("Parameters")
         self.dock.setObjectName("AdaptiveParamsDock")
         self.dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.dock.setToolTip("Parameters: adjust α, μ, and k₀ to reshape πₐ responses.")
         host = QWidget()
         layout = QVBoxLayout(host)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -87,6 +94,10 @@ class Controls:
         slider.setValue(value)
         slider.setSingleStep(1)
         slider.valueChanged.connect(lambda v, k=key, lbl=label, txt=label_text: self._on_value_changed(k, lbl, txt, v))
+        desc = self._DESCRIPTIONS.get(key, "")
+        if desc:
+            label.setToolTip(desc)
+            slider.setToolTip(desc + " Drag to adjust.")
         layout.addWidget(label)
         layout.addWidget(slider)
         self._value_labels[key] = label
@@ -118,6 +129,11 @@ class Canvas(QWidget):
         self.setMinimumSize(QSize(640, 480))
         self.setFocusPolicy(Qt.StrongFocus)
         self.setMouseTracking(True)
+        self.setToolTip(
+            "Canvas: left-click with the active tool.\n"
+            "PiA Circle: first click = center, second click = radius.\n"
+            "PiA Curve: click points, press Enter to commit."
+        )
 
         self._params: Params = {"alpha": 0.0, "mu": 0.05, "k0": 0.1}
         self._shapes: List[Shape] = []
