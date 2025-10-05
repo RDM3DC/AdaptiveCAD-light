@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QStatusBar, QToolBar
 
+from edit_tools import BreakTool, EditCtx, ExtendTool, JoinTool, TrimTool
 from widgets import Canvas, Controls
 
 
@@ -19,7 +20,7 @@ class Main(QMainWindow):
         self.setWindowTitle("AdaptiveCAD Playground (πₐ)")
 
         self.canvas = Canvas()
-        self.controls = Controls(self.canvas.set_params)
+        self.controls = Controls(self.canvas.set_params, self.canvas.set_osnap_groups, self.canvas.osnap_groups)
 
         self.setCentralWidget(self.canvas)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls.dock)
@@ -28,6 +29,24 @@ class Main(QMainWindow):
         self._tool_actions: dict[str, QAction] = {}
         self._snap_action: QAction | None = None
         self._dims_action: QAction | None = None
+        self._pointer_actions: dict[str, QAction] = {}
+        self._edit_ctx = EditCtx(
+            tol=12.0,
+            get_selection=self.canvas.get_selection,
+            set_selection=self.canvas.set_selection,
+            update_scene=self.canvas.update_scene,
+            world_from_event=self.canvas.world_from_event,
+            osnap_targets=self.canvas.osnap_targets,
+            update_status=self.canvas.post_status_message,
+            request_repaint=self.canvas.update,
+            clear_pointer=self._clear_pointer_mode,
+        )
+        self._edit_tools = {
+            "join": JoinTool(self._edit_ctx),
+            "break": BreakTool(self._edit_ctx),
+            "trim": TrimTool(self._edit_ctx),
+            "extend": ExtendTool(self._edit_ctx),
+        }
         self._setup_status_bar()
         self._make_toolbar()
         self._make_menu()
@@ -101,6 +120,29 @@ class Main(QMainWindow):
             action.setStatusTip(tip)
             self._tool_actions[name] = action
 
+        toolbar.addSeparator()
+
+        join_tip = "Join: merge connected segments/polylines into longer paths."
+        join_action = QAction(self._load_icon("join.svg"), "Join", self)
+        join_action.triggered.connect(self._trigger_join)
+        join_action.setToolTip(join_tip)
+        join_action.setStatusTip(join_tip)
+        toolbar.addAction(join_action)
+
+        pointer_defs = (
+            ("break", "Break", "break.svg", "Break: split the first selected path at the picked point."),
+            ("trim", "Trim", "trim.svg", "Trim: shorten the first selected segment to a cutter."),
+            ("extend", "Extend", "extend.svg", "Extend: grow the first selected segment to meet a boundary."),
+        )
+        for name, text, icon_name, tip in pointer_defs:
+            action = QAction(self._load_icon(icon_name), text, self)
+            action.setCheckable(True)
+            action.triggered.connect(lambda checked, n=name: self._toggle_pointer_tool(n, checked))
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
+            toolbar.addAction(action)
+            self._pointer_actions[name] = action
+
     def _make_menu(self) -> None:
         menu_bar = self.menuBar()
         file_menu = menu_bar.addMenu("&File")
@@ -154,6 +196,8 @@ class Main(QMainWindow):
         self.canvas.set_tool(name)
 
     def _on_tool_changed(self, name: str) -> None:
+        if name != "select":
+            self._clear_pointer_mode()
         text = {
             "select": "Select",
             "piacircle": "PiA Circle",
@@ -205,6 +249,49 @@ class Main(QMainWindow):
         blocked = self._dims_action.blockSignals(True)
         self._dims_action.setChecked(bool(visible))
         self._dims_action.blockSignals(blocked)
+
+    def _trigger_join(self) -> None:
+        self._clear_pointer_mode()
+        self.canvas.set_tool("select")
+        tool = self._edit_tools.get("join")
+        if tool is not None:
+            tool.on_trigger()
+
+    def _toggle_pointer_tool(self, name: str, checked: bool) -> None:
+        tool = self._edit_tools.get(name)
+        if tool is None:
+            return
+        if checked:
+            for other_name, action in self._pointer_actions.items():
+                if other_name == name:
+                    continue
+                blocked = action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(blocked)
+            tool.deactivate()
+            self.canvas.set_tool("select")
+            self.canvas.set_pointer_tool(name, tool)
+            hints = {
+                "break": "Break: click the selected path where you want the split.",
+                "trim": "Trim: pick cutter after selecting target (Shift-click to multi-select).",
+                "extend": "Extend: choose boundary after selecting target segment.",
+            }
+            hint = hints.get(name)
+            if hint:
+                self.canvas.post_status_message(hint)
+        else:
+            if self.canvas.pointer_tool_name() == name:
+                self.canvas.clear_pointer_tool()
+            tool.deactivate()
+            self.canvas.post_status_message("")
+
+    def _clear_pointer_mode(self) -> None:
+        self.canvas.clear_pointer_tool()
+        for action in self._pointer_actions.values():
+            blocked = action.blockSignals(True)
+            action.setChecked(False)
+            action.blockSignals(blocked)
+        self.canvas.post_status_message("")
 
     def _load_icon(self, filename: str) -> QIcon:
         icon_path = Path(__file__).with_name("icons") / filename

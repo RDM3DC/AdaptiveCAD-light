@@ -5,7 +5,7 @@ Integrate by forwarding mouse events from your Canvas to the active tool.
 """
 
 from __future__ import annotations
-from typing import Tuple, Optional, Callable, List
+from typing import Tuple, Optional, Callable, List, Any
 from dataclasses import dataclass
 from dimensions import LinearDimension, RadialDimension, AngularDimension, DimStyle, linear_label, radial_label, angular_label
 from osnap import osnap_pick
@@ -21,7 +21,7 @@ class ToolContext:
     request_repaint: Callable[[], None]
     hit_test_circle: Callable[[Point], Optional[Tuple[Point, float, str]]]  # returns (center, radius, shape_id) if a circle is under cursor
     world_from_event: Callable[[object], Point]  # mouse event -> world (x,y)
-    osnap_targets: Callable[[], List[Tuple[str, Point]]]  # named points for snapping
+    osnap_targets: Callable[[], List[Tuple[str, Any]]]  # named points or descriptors for snapping
 
 class DimLinearTool:
     def __init__(self, ctx: ToolContext):
@@ -31,7 +31,7 @@ class DimLinearTool:
         self.offset: Optional[Point] = None
 
     def mouse_press(self, ev):
-        p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
+        p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
         if self.p1 is None:
             self.p1 = p
             self.ctx.update_status("LinearDim: pick second point")
@@ -126,7 +126,7 @@ class DimAngularTool:
         self.attach: Optional[Point] = None
 
     def mouse_press(self, ev):
-        p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
+        p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
         if self.vtx is None:
             self.vtx = p
             self.ctx.update_status("AngularDim: pick first ray point")
@@ -166,8 +166,8 @@ class MeasureTool:
         self.last: Optional[str] = None
 
     def mouse_move(self, ev):
-        p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
-        # Basic measure: nearest segment length or angle if 3 picks are retained; minimal demo
+        p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
+    # Basic measure: nearest segment length or angle if 3 picks are retained; minimal demo
         # For v0.1, just show cursor world coords (extend later to arc/area as needed)
         self.ctx.update_status(f"X={p[0]:.3f}, Y={p[1]:.3f}")
 

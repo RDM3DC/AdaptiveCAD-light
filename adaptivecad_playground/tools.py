@@ -34,11 +34,76 @@ class ToolBase:
 class SelectTool(ToolBase):
     """Hit-test the scene and select shapes."""
 
+    def __init__(self, canvas):
+        super().__init__(canvas)
+        self._press_pos: Point | None = None
+        self._dragging = False
+        self._modifiers = Qt.KeyboardModifiers()
+
     def mouse_press(self, event):
         if event.button() != Qt.LeftButton:
             return
-        point = (event.position().x(), event.position().y())
-        self.canvas.select_shape_at(point)
+        self._press_pos = (event.position().x(), event.position().y())
+        self._modifiers = event.modifiers()
+        self._dragging = False
+        self.canvas.begin_selection_rect(self._press_pos)
+
+    def mouse_move(self, event):
+        if self._press_pos is None:
+            return
+        if not (event.buttons() & Qt.LeftButton):
+            return
+        current = (event.position().x(), event.position().y())
+        if not self._dragging:
+            dx = current[0] - self._press_pos[0]
+            dy = current[1] - self._press_pos[1]
+            if math.hypot(dx, dy) >= 4.0:
+                self._dragging = True
+        if self._dragging:
+            self.canvas.update_selection_rect(current)
+
+    def mouse_release(self, event):
+        if event.button() != Qt.LeftButton or self._press_pos is None:
+            return
+        additive = bool(self._modifiers & Qt.ShiftModifier)
+        toggle = bool(self._modifiers & Qt.ControlModifier)
+        if self._dragging:
+            rect = self.canvas.finalize_selection_rect()
+            if rect is not None:
+                self.canvas.select_items_in_rect(rect, additive=additive or toggle, toggle=toggle)
+            else:
+                self.canvas.clear_selection_rect()
+        else:
+            point = (event.position().x(), event.position().y())
+            self.canvas.clear_selection_rect()
+            self.canvas.select_items_at(point, additive=additive or toggle, toggle=toggle)
+        self._press_pos = None
+        self._dragging = False
+
+    def deactivate(self):
+        self._press_pos = None
+        self._dragging = False
+        self.canvas.clear_selection_rect()
+
+    def key_press(self, event):
+        key = event.key()
+        if key in (Qt.Key_Delete, Qt.Key_Backspace):
+            shape_selection = self.canvas.get_selection()
+            dim_selection = self.canvas.get_selected_dimension_ids()
+            if not shape_selection and not dim_selection:
+                return
+            removed_shapes, removed_dims = self.canvas.delete_items(shape_selection, dim_selection)
+            if not removed_shapes and not removed_dims:
+                return
+            fragments: List[str] = []
+            if removed_shapes:
+                fragments.append(f"{removed_shapes} {'shape' if removed_shapes == 1 else 'shapes'}")
+            if removed_dims:
+                fragments.append(f"{removed_dims} {'dimension' if removed_dims == 1 else 'dimensions'}")
+            self.canvas.post_status_message(f"Deleted {' and '.join(fragments)}")
+        elif key == Qt.Key_Escape:
+            self.canvas.clear_selection_rect()
+            self.canvas.set_selection([])
 
 
 class PiACircleTool(ToolBase):

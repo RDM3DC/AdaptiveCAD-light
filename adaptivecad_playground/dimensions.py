@@ -13,7 +13,7 @@ Public API (minimal):
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Tuple, Optional, Literal, Dict, Any, List
 
 from geometry import angle_deg, euclid_len, radial_label as geom_radial_label, format_length as geom_format_length
@@ -45,11 +45,11 @@ def format_length(L_model: float, style: DimStyle) -> str:
 
 @dataclass
 class LinearDimension:
-    id: str
-    p1: Point
-    p2: Point
-    offset: Point       # label anchor position in world coords
-    style: DimStyle
+    id: str = ""
+    p1: Point = field(default_factory=lambda: (0.0, 0.0))
+    p2: Point = field(default_factory=lambda: (0.0, 0.0))
+    offset: Point = field(default_factory=lambda: (0.0, 0.0))  # label anchor position in world coords
+    style: DimStyle = field(default_factory=DimStyle)
 
     def asdict(self) -> Dict[str, Any]:
         return {
@@ -63,13 +63,13 @@ class LinearDimension:
 
 @dataclass
 class RadialDimension:
-    id: str
-    center: Point
-    radius: float
-    attach: Point       # label anchor position in world coords
-    style: DimStyle
+    id: str = ""
+    center: Point = field(default_factory=lambda: (0.0, 0.0))
+    radius: float = 0.0
+    attach: Point = field(default_factory=lambda: (0.0, 0.0))  # label anchor position in world coords
+    style: DimStyle = field(default_factory=DimStyle)
     shape_ref: Optional[str] = None  # optional link to a circle id
-    params: Optional[Dict[str, float]] = None
+    params: Optional[Dict[str, float]] = field(default_factory=dict)
 
     def asdict(self) -> Dict[str, Any]:
         data = {
@@ -87,12 +87,12 @@ class RadialDimension:
 
 @dataclass
 class AngularDimension:
-    id: str
-    vtx: Point          # vertex
-    p1: Point           # point on ray 1
-    p2: Point           # point on ray 2
-    attach: Point       # label anchor
-    style: DimStyle
+    id: str = ""
+    vtx: Point = field(default_factory=lambda: (0.0, 0.0))         # vertex
+    p1: Point = field(default_factory=lambda: (0.0, 0.0))          # point on ray 1
+    p2: Point = field(default_factory=lambda: (0.0, 0.0))          # point on ray 2
+    attach: Point = field(default_factory=lambda: (0.0, 0.0))      # label anchor
+    style: DimStyle = field(default_factory=DimStyle)
 
     def asdict(self) -> Dict[str, Any]:
         return {

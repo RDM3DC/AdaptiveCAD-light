@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDockWidget,
     QFileDialog,
+    QGroupBox,
     QLabel,
     QSlider,
     QVBoxLayout,
@@ -25,8 +27,15 @@ from geometry import (
     curve_area,
     curve_arc_length,
     curve_points,
+    polyline_length,
+    polygon_area,
     pi_a,
     point_to_polyline_distance,
+)
+from intersect2d import (
+    circle_circle_intersections,
+    seg_circle_intersections,
+    seg_seg_intersection,
 )
 from dimensions import (
     DimStyle,
@@ -41,6 +50,7 @@ from dimensions import (
 )
 from dim_draw import draw_linear_dim, draw_radial_dim, draw_angular_dim
 from dim_tools import ToolContext, DimAngularTool, DimLinearTool, DimRadialTool, MeasureTool
+from osnap import osnap_pick
 from tools import PiACircleTool, PiACurveTool, SelectTool
 
 Point = Tuple[float, float]
@@ -173,8 +183,20 @@ class Controls:
         "k0": "Curvature seed k₀: base curvature that bends circles/curves.",
     }
 
-    def __init__(self, set_params_cb):
+    _OSNAP_GROUPS = [
+        ("end", "Endpoints", "Snap to shape endpoints."),
+        ("mid", "Midpoints", "Snap to segment midpoints."),
+        ("center", "Centers", "Snap to circle centers."),
+        ("quadrant", "Quadrants", "Snap to 90° points on circles."),
+        ("intersection", "Intersections", "Snap to apparent intersections."),
+        ("perp", "Perpendicular", "Snap perpendicular/nearest points on segments."),
+        ("dimension", "Dimensions", "Snap to dimension anchors."),
+    ]
+
+    def __init__(self, set_params_cb, set_osnap_cb, get_osnap_cb):
         self._set_params_cb = set_params_cb
+        self._set_osnap_cb = set_osnap_cb
+        self._get_osnap_cb = get_osnap_cb
         self.dock = QDockWidget("Parameters")
         self.dock.setObjectName("AdaptiveParamsDock")
         self.dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -186,14 +208,31 @@ class Controls:
 
         self._value_labels: Dict[str, QLabel] = {}
         self._slider_widgets: Dict[str, QSlider] = {}
+        self._osnap_checks: Dict[str, QCheckBox] = {}
 
         self._add_slider(layout, "alpha", "α", 0, 100, 0)
-        self._add_slider(layout, "mu", "μ", 0, 100, 5)
-        self._add_slider(layout, "k0", "k₀", -100, 100, 10)
+        self._add_slider(layout, "mu", "μ", 0, 100, 0)
+        self._add_slider(layout, "k0", "k₀", -100, 100, 0)
+
+        snaps_box = QGroupBox("Object Snaps")
+        snaps_layout = QVBoxLayout()
+        snaps_layout.setSpacing(4)
+        snaps_box.setLayout(snaps_layout)
+        snaps_box.setToolTip("Toggle which object snaps are active when drawing.")
+        osnap_state = dict(self._get_osnap_cb())
+        for key, label, tip in self._OSNAP_GROUPS:
+            checkbox = QCheckBox(label)
+            checkbox.setToolTip(tip)
+            checkbox.setChecked(bool(osnap_state.get(key, True)))
+            checkbox.stateChanged.connect(lambda state, k=key: self._handle_osnap_changed(k, bool(state)))
+            snaps_layout.addWidget(checkbox)
+            self._osnap_checks[key] = checkbox
+        layout.addWidget(snaps_box)
 
         layout.addStretch(1)
         self.dock.setWidget(host)
-        self._emit()
+        self._emit_params()
+        self._emit_osnaps()
 
     def _add_slider(self, layout: QVBoxLayout, key: str, label_text: str, mn: int, mx: int, value: int) -> None:
         label = QLabel(f"{label_text}: {value / 100:.2f}")
@@ -213,15 +252,25 @@ class Controls:
 
     def _on_value_changed(self, key: str, label: QLabel, label_text: str, value: int) -> None:
         label.setText(f"{label_text}: {value / 100:.2f}")
-        self._emit()
+        self._emit_params()
 
-    def _emit(self) -> None:
+    def _handle_osnap_changed(self, key: str, _enabled: bool) -> None:
+        # stateChanged sends 0/2; bool(state) collapses to desired truthiness
+        if key not in self._osnap_checks:
+            return
+        self._emit_osnaps()
+
+    def _emit_params(self) -> None:
         params = {
             "alpha": self._slider_widgets["alpha"].value() / 100.0,
             "mu": self._slider_widgets["mu"].value() / 100.0,
             "k0": self._slider_widgets["k0"].value() / 100.0,
         }
         self._set_params_cb(params)
+
+    def _emit_osnaps(self) -> None:
+        states = {key: checkbox.isChecked() for key, checkbox in self._osnap_checks.items()}
+        self._set_osnap_cb(states)
 
 
 class Canvas(QWidget):
@@ -244,9 +293,10 @@ class Canvas(QWidget):
             "PiA Curve: click points, press Enter to commit."
         )
 
-        self._params: Params = {"alpha": 0.0, "mu": 0.05, "k0": 0.1}
+        self._params: Params = {"alpha": 0.0, "mu": 0.0, "k0": 0.0}
         self._shapes: List[Shape] = []
-        self._selected_index: Optional[int] = None
+        self._selection: List[str] = []
+        self._selected_dimensions: List[str] = []
         self._temp_shape: Optional[Shape] = None
         self._shape_counter: int = 1
 
@@ -258,10 +308,30 @@ class Canvas(QWidget):
         self._tool_name: Optional[str] = None
         self._tool_cache = {}
         self._tool = None
+        self._pointer_tool: object | None = None
+        self._pointer_tool_name: Optional[str] = None
         self._dynamic_tools = {"dim_linear", "dim_radial", "dim_angular", "measure"}
+        self._selection_drag_origin: Optional[Point] = None
+        self._selection_rect: Optional[Tuple[float, float, float, float]] = None
         # Snap and grid
         self._snap_to_grid = True
         self._grid_size = 20
+        self._osnap_tolerance = 12.0
+        self._last_osnap: Optional[Tuple[str, Point]] = None
+        self._osnap_groups: Dict[str, set[str]] = {
+            "end": {"end"},
+            "mid": {"mid"},
+            "center": {"center"},
+            "quadrant": {"quad", "90"},
+            "intersection": {"appint"},
+            "perp": {"perp", "closest"},
+            "dimension": {"dim"},
+        }
+        self._enabled_osnap_groups: set[str] = set(self._osnap_groups.keys())
+        self._osnap_kind_to_group: Dict[str, str] = {}
+        for group, kinds in self._osnap_groups.items():
+            for kind in kinds:
+                self._osnap_kind_to_group[kind] = group
 
         # History stacks
         self._undo_stack = []
@@ -278,6 +348,25 @@ class Canvas(QWidget):
 
     def params(self) -> Params:
         return dict(self._params)
+
+    def osnap_groups(self) -> Dict[str, bool]:
+        return {name: name in self._enabled_osnap_groups for name in self._osnap_groups}
+
+    def set_osnap_groups(self, states: Dict[str, bool]) -> None:
+        updated = set(self._enabled_osnap_groups)
+        for name, enabled in states.items():
+            if name not in self._osnap_groups:
+                continue
+            if enabled:
+                updated.add(name)
+            else:
+                updated.discard(name)
+        if updated == self._enabled_osnap_groups:
+            return
+        self._enabled_osnap_groups = updated
+        if self._last_osnap is not None:
+            self._last_osnap = None
+        self.update()
 
     # ------------------------------------------------------------------
     # Status helpers
@@ -330,12 +419,28 @@ class Canvas(QWidget):
         return self._grid_size
 
     def snap_point(self, pt: Point) -> Point:
+        x, y = float(pt[0]), float(pt[1])
+        snapped, kind = osnap_pick((x, y), self.osnap_targets(), tol=float(self._osnap_tolerance))
+        snapped_pt = (float(snapped[0]), float(snapped[1]))
+        state_changed = False
+        if kind:
+            if self._last_osnap != (kind, snapped_pt):
+                self._last_osnap = (kind, snapped_pt)
+                state_changed = True
+        else:
+            if self._last_osnap is not None:
+                self._last_osnap = None
+                state_changed = True
+        if state_changed:
+            self.update()
+        if kind:
+            return snapped_pt
         if not self._snap_to_grid:
-            return (float(pt[0]), float(pt[1]))
+            return (x, y)
         g = float(self._grid_size)
-        return (round(pt[0] / g) * g, round(pt[1] / g) * g)
+        return (round(x / g) * g, round(y / g) * g)
 
-    def _world_from_event(self, event) -> Point:
+    def world_from_event(self, event) -> Point:
         point = (event.position().x(), event.position().y())
         return self.snap_point(point)
 
@@ -367,6 +472,8 @@ class Canvas(QWidget):
     def set_tool(self, name: str) -> None:
         if name == self._tool_name:
             return
+        if name != "select":
+            self.clear_pointer_tool()
         if name not in self.available_tools():
             raise ValueError(f"Unknown tool '{name}'")
         if self._tool is not None:
@@ -405,7 +512,7 @@ class Canvas(QWidget):
             update_status=self.post_status_message,
             request_repaint=self.update,
             hit_test_circle=self.hit_test_circle,
-            world_from_event=self._world_from_event,
+            world_from_event=self.world_from_event,
             osnap_targets=self.osnap_targets,
         )
 
@@ -446,7 +553,7 @@ class Canvas(QWidget):
         shape = self.shape_from_circle(center, radius, self._params)
         shape.id = self._next_shape_id()
         self._shapes.append(shape)
-        self._set_selected_index(len(self._shapes) - 1)
+        self._set_selection([shape.id])
         self.update()
 
     def add_curve(self, control_points: Sequence[Point]) -> None:
@@ -456,7 +563,7 @@ class Canvas(QWidget):
         shape = self.shape_from_curve(control_points, self._params)
         shape.id = self._next_shape_id()
         self._shapes.append(shape)
-        self._set_selected_index(len(self._shapes) - 1)
+        self._set_selection([shape.id])
         self.update()
 
     def add_dimension(self, dimension: object) -> None:
@@ -479,57 +586,254 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------------
     # Selection & status helpers
-    def select_shape_at(self, point: Point) -> None:
-        if not self._shapes:
-            self._set_selected_index(None)
-            return
-        threshold = 12.0
-        best_index = None
+    def _hit_test_shape(self, point: Point, threshold: float = 12.0) -> Optional[str]:
+        best_shape: Optional[Shape] = None
         best_distance = float("inf")
-        for idx, shape in enumerate(self._shapes):
+        for shape in self._shapes:
+            if shape.points is None or len(shape.points) < 2:
+                continue
             dist = point_to_polyline_distance(point, shape.points)
             if dist < best_distance:
                 best_distance = dist
-                best_index = idx
-        if best_index is not None and best_distance <= threshold:
-            self._set_selected_index(best_index)
-        else:
-            self._set_selected_index(None)
+                best_shape = shape
+        if best_shape is None or best_distance > threshold:
+            return None
+        if not best_shape.id:
+            best_shape.id = self._next_shape_id()
+        return best_shape.id
 
-    def osnap_targets(self) -> List[Tuple[str, Point]]:
-        targets: List[Tuple[str, Point]] = []
+    def select_shape_at(self, point: Point, *, additive: bool = False, toggle: bool = False) -> None:
+        self.clear_selection_rect()
+        shape_id = self._hit_test_shape(point)
+        if shape_id is None:
+            if not additive and not toggle:
+                self._apply_selection_results([], [], additive=False, toggle=False)
+            return
+        self._apply_selection_results([shape_id], [], additive=additive, toggle=toggle)
+
+    def select_items_at(self, point: Point, *, additive: bool = False, toggle: bool = False) -> None:
+        self.clear_selection_rect()
+        shape_id = self._hit_test_shape(point)
+        if shape_id:
+            self._apply_selection_results([shape_id], [], additive=additive, toggle=toggle)
+            return
+        dim_id = self._dimension_hit_test(point)
+        if dim_id:
+            self._apply_selection_results([], [dim_id], additive=additive, toggle=toggle)
+            return
+        if not additive and not toggle:
+            self._apply_selection_results([], [], additive=False, toggle=False)
+
+    def begin_selection_rect(self, origin: Point) -> None:
+        self._selection_drag_origin = origin
+        self._selection_rect = None
+
+    def update_selection_rect(self, current: Point) -> None:
+        if self._selection_drag_origin is None:
+            return
+        x0, y0 = self._selection_drag_origin
+        x1, y1 = current
+        rect = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+        self._selection_rect = rect
+        self.update()
+
+    def finalize_selection_rect(self) -> Optional[Tuple[float, float, float, float]]:
+        rect = self._selection_rect
+        self._selection_rect = None
+        self._selection_drag_origin = None
+        self.update()
+        if rect is None:
+            return None
+        x0, y0, x1, y1 = rect
+        if abs(x1 - x0) < 1e-3 or abs(y1 - y0) < 1e-3:
+            return None
+        return rect
+
+    def clear_selection_rect(self) -> None:
+        if self._selection_rect is None and self._selection_drag_origin is None:
+            return
+        self._selection_rect = None
+        self._selection_drag_origin = None
+        self.update()
+
+    def select_shapes_in_rect(
+        self,
+        rect: Tuple[float, float, float, float],
+        *,
+        additive: bool = False,
+        toggle: bool = False,
+    ) -> None:
+        x0, y0, x1, y1 = rect
+        x_min, x_max = (min(x0, x1), max(x0, x1))
+        y_min, y_max = (min(y0, y1), max(y0, y1))
+        hits: List[str] = []
         for shape in self._shapes:
-            if shape.type == "piacircle" and shape.center is not None:
-                cx, cy = shape.center
-                targets.append(("center", shape.center))
-                if shape.radius:
-                    r = float(shape.radius)
-                    targets.extend([
-                        ("quad", (cx + r, cy)),
-                        ("quad", (cx - r, cy)),
-                        ("quad", (cx, cy + r)),
-                        ("quad", (cx, cy - r)),
-                    ])
-            elif shape.type == "piacurve" and shape.control_points:
-                ctrl = shape.control_points
-                if ctrl:
-                    targets.append(("end", ctrl[0]))
-                    targets.append(("end", ctrl[-1]))
-                    for mid in ctrl[1:-1]:
-                        targets.append(("mid", mid))
+            if shape.points is None or len(shape.points) < 2:
+                continue
+            if not shape.id:
+                shape.id = self._next_shape_id()
+            pts = shape.points
+            shape_min_x = float(np.min(pts[:, 0]))
+            shape_max_x = float(np.max(pts[:, 0]))
+            shape_min_y = float(np.min(pts[:, 1]))
+            shape_max_y = float(np.max(pts[:, 1]))
+            if shape_max_x < x_min or shape_min_x > x_max or shape_max_y < y_min or shape_min_y > y_max:
+                continue
+            hits.append(shape.id)
+        dim_hits = self._dimensions_in_rect(rect)
+        if not hits and not dim_hits and not additive and not toggle:
+            self._apply_selection_results([], [], additive=False, toggle=False)
+            return
+        self._apply_selection_results(hits, dim_hits, additive=additive, toggle=toggle)
+
+    def select_items_in_rect(
+        self,
+        rect: Tuple[float, float, float, float],
+        *,
+        additive: bool = False,
+        toggle: bool = False,
+    ) -> None:
+        self.select_shapes_in_rect(rect, additive=additive, toggle=toggle)
+
+    def osnap_targets(self) -> List[Tuple[str, object]]:
+        point_targets: List[Tuple[str, Point]] = []
+        segments: List[Tuple[Point, Point]] = []
+        circles: List[Tuple[Point, float]] = []
+
+        allow_perp = "perp" in self._enabled_osnap_groups
+        allow_intersections = "intersection" in self._enabled_osnap_groups
+
+        def kind_enabled(kind: str) -> bool:
+            group = self._osnap_kind_to_group.get(kind)
+            if group is None:
+                return True
+            return group in self._enabled_osnap_groups
+
+        def add_point(kind: str, pt: Point) -> None:
+            if not kind_enabled(kind):
+                return
+            px, py = float(pt[0]), float(pt[1])
+            key = (kind, round(px * 1e4), round(py * 1e4))
+            if key in seen_points:
+                return
+            seen_points.add(key)
+            point_targets.append((kind, (px, py)))
+
+        def add_segment(a: Point, b: Point) -> None:
+            if not (allow_perp or allow_intersections):
+                return
+            ax, ay = float(a[0]), float(a[1])
+            bx, by = float(b[0]), float(b[1])
+            if (abs(ax - bx) < 1e-9 and abs(ay - by) < 1e-9):
+                return
+            segments.append(((ax, ay), (bx, by)))
+
+        seen_points: set[Tuple[str, int, int]] = set()
+
+        for shape in self._shapes:
+            if shape.type == "piacircle" and shape.center is not None and shape.radius:
+                cx, cy = float(shape.center[0]), float(shape.center[1])
+                r = float(shape.radius)
+                add_point("center", (cx, cy))
+                if allow_perp or allow_intersections:
+                    circles.append(((cx, cy), r))
+                for pt in [
+                    (cx + r, cy),
+                    (cx - r, cy),
+                    (cx, cy + r),
+                    (cx, cy - r),
+                ]:
+                    add_point("quad", pt)
+                    add_point("90", pt)
+            elif shape.points is not None and len(shape.points) >= 2:
+                pts = [tuple(map(float, pt)) for pt in shape.points.tolist()]
+                add_point("end", pts[0])
+                add_point("end", pts[-1])
+                for idx in range(len(pts) - 1):
+                    a = pts[idx]
+                    b = pts[idx + 1]
+                    add_segment(a, b)
+                    if shape.type != "piacurve":
+                        mid = ((a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5)
+                        add_point("mid", mid)
+
+                if shape.type == "piacurve":
+                    if kind_enabled("mid"):
+                        # Find the point halfway along the sampled curve length.
+                        total = 0.0
+                        seg_lengths: List[float] = []
+                        for idx in range(len(pts) - 1):
+                            a = pts[idx]
+                            b = pts[idx + 1]
+                            seg = math.hypot(b[0] - a[0], b[1] - a[1])
+                            seg_lengths.append(seg)
+                            total += seg
+                        if total > 0.0:
+                            target = total * 0.5
+                            accum = 0.0
+                            mid_pt = pts[0]
+                            for idx, seg in enumerate(seg_lengths):
+                                next_accum = accum + seg
+                                if next_accum >= target:
+                                    if seg > 0.0:
+                                        t = (target - accum) / seg
+                                        a = pts[idx]
+                                        b = pts[idx + 1]
+                                        mid_pt = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+                                    else:
+                                        mid_pt = pts[idx]
+                                    break
+                                accum = next_accum
+                            else:
+                                mid_pt = pts[len(pts) // 2]
+                            add_point("mid", mid_pt)
+
         for dim in self._dimensions:
             if isinstance(dim, LinearDimension):
-                targets.extend([("dim", dim.p1), ("dim", dim.p2), ("dim", dim.offset)])
+                add_point("dim", dim.p1)
+                add_point("dim", dim.p2)
+                add_point("dim", dim.offset)
+                add_segment(dim.p1, dim.p2)
             elif isinstance(dim, RadialDimension):
-                targets.extend([("dim", dim.center), ("dim", dim.attach)])
+                add_point("dim", dim.center)
+                add_point("dim", dim.attach)
+                add_segment(dim.center, dim.attach)
             elif isinstance(dim, AngularDimension):
-                targets.extend([
-                    ("dim", dim.vtx),
-                    ("dim", dim.p1),
-                    ("dim", dim.p2),
-                    ("dim", dim.attach),
-                ])
-        return targets
+                add_point("dim", dim.vtx)
+                add_point("dim", dim.p1)
+                add_point("dim", dim.p2)
+                add_point("dim", dim.attach)
+                add_segment(dim.vtx, dim.p1)
+                add_segment(dim.vtx, dim.p2)
+
+        # Apparent intersections between segments and circles
+        if allow_intersections:
+            for i in range(len(segments)):
+                a0, a1 = segments[i]
+                for j in range(i + 1, len(segments)):
+                    b0, b1 = segments[j]
+                    pt = seg_seg_intersection(a0, a1, b0, b1)
+                    if pt is not None:
+                        add_point("appint", pt)
+
+            for seg in segments:
+                for circle in circles:
+                    for pt in seg_circle_intersections(seg[0], seg[1], circle[0], circle[1]):
+                        add_point("appint", pt)
+
+            for i in range(len(circles)):
+                for j in range(i + 1, len(circles)):
+                    c0, r0 = circles[i]
+                    c1, r1 = circles[j]
+                    for pt in circle_circle_intersections(c0, r0, c1, r1):
+                        add_point("appint", pt)
+
+        out: List[Tuple[str, object]] = []
+        out.extend(point_targets)
+        if allow_perp:
+            out.extend(("segment", seg) for seg in segments)
+            out.extend(("circle", circ) for circ in circles)
+        return out
 
     def hit_test_circle(self, point: Point) -> Optional[Tuple[Point, float, str]]:
         best: Optional[Tuple[Point, float, str]] = None
@@ -554,6 +858,72 @@ class Canvas(QWidget):
             if shape.id == shape_id:
                 return shape
         return None
+
+    def _dimension_by_id(self, dimension_id: Optional[str]):
+        if not dimension_id:
+            return None
+        for dim in self._dimensions:
+            if getattr(dim, "id", None) == dimension_id:
+                return dim
+        return None
+
+    def _dimension_bounds(self, dimension) -> Tuple[float, float, float, float]:
+        pts: List[Point] = []
+        if isinstance(dimension, LinearDimension):
+            pts = [dimension.p1, dimension.p2, dimension.offset]
+        elif isinstance(dimension, RadialDimension):
+            pts = [dimension.center, dimension.attach]
+        elif isinstance(dimension, AngularDimension):
+            pts = [dimension.vtx, dimension.p1, dimension.p2, dimension.attach]
+        else:
+            # Fallback: try generic attributes
+            for name in ("p1", "p2", "offset", "center", "attach", "vtx"):
+                value = getattr(dimension, name, None)
+                if isinstance(value, tuple) and len(value) == 2:
+                    pts.append(value)
+        if not pts:
+            return (0.0, 0.0, 0.0, 0.0)
+        xs = [float(pt[0]) for pt in pts]
+        ys = [float(pt[1]) for pt in pts]
+        padding = 8.0
+        return (
+            min(xs) - padding,
+            min(ys) - padding,
+            max(xs) + padding,
+            max(ys) + padding,
+        )
+
+    def _dimension_hit_test(self, point: Point) -> Optional[str]:
+        x, y = point
+        best_id: Optional[str] = None
+        best_area = float("inf")
+        for dim in self._dimensions:
+            dim_id = getattr(dim, "id", None)
+            if not dim_id:
+                continue
+            x0, y0, x1, y1 = self._dimension_bounds(dim)
+            if x < x0 or x > x1 or y < y0 or y > y1:
+                continue
+            area = (x1 - x0) * (y1 - y0)
+            if area < best_area:
+                best_area = area
+                best_id = dim_id
+        return best_id
+
+    def _dimensions_in_rect(self, rect: Tuple[float, float, float, float]) -> List[str]:
+        x0, y0, x1, y1 = rect
+        x_min, x_max = (min(x0, x1), max(x0, x1))
+        y_min, y_max = (min(y0, y1), max(y0, y1))
+        hits: List[str] = []
+        for dim in self._dimensions:
+            dim_id = getattr(dim, "id", None)
+            if not dim_id:
+                continue
+            dx0, dy0, dx1, dy1 = self._dimension_bounds(dim)
+            if dx1 < x_min or dx0 > x_max or dy1 < y_min or dy0 > y_max:
+                continue
+            hits.append(dim_id)
+        return hits
 
     def _reseed_shape_counter(self) -> None:
         max_seen = 0
@@ -583,20 +953,282 @@ class Canvas(QWidget):
         self.status_changed.emit(dict(self._status_state))
 
     def _emit_selection_status(self) -> None:
-        if self._selected_index is None:
+        shape_count = len(self._selection)
+        dim_count = len(self._selected_dimensions)
+        if shape_count == 0 and dim_count == 0:
             self._emit_default_status()
             return
-        self.emit_status_from_shape(self._shapes[self._selected_index])
+        if shape_count == 1 and dim_count == 0:
+            shape = self._shape_by_id(self._selection[0])
+            if shape is not None:
+                self.emit_status_from_shape(shape)
+                return
+        parts = []
+        if shape_count:
+            parts.append(f"{shape_count} shape{'s' if shape_count != 1 else ''}")
+        if dim_count:
+            parts.append(f"{dim_count} dimension{'s' if dim_count != 1 else ''}")
+        message = ", ".join(parts) + " selected"
+        self._emit_status(
+            {
+                "kind": None,
+                "radius": None,
+                "pi_a": None,
+                "arc_length": None,
+                "area": None,
+                "message": message,
+            }
+        )
 
-    def _set_selected_index(self, index: Optional[int]) -> None:
-        if index is not None and (index < 0 or index >= len(self._shapes)):
-            index = None
-        if index == self._selected_index:
+    def _set_selection(self, ids: Sequence[Optional[str]]) -> None:
+        filtered: List[str] = []
+        seen = set()
+        for sid in ids:
+            if sid is None:
+                continue
+            sid_str = sid if isinstance(sid, str) else str(sid)
+            if sid_str in seen:
+                continue
+            shape = self._shape_by_id(sid_str)
+            if shape is None:
+                continue
+            filtered.append(sid_str)
+            seen.add(sid_str)
+        if filtered == self._selection:
             self._emit_selection_status()
             return
-        self._selected_index = index
+        self._selection = filtered
         self._emit_selection_status()
         self.update()
+
+    def _set_dimension_selection(self, ids: Sequence[Optional[str]]) -> None:
+        filtered: List[str] = []
+        seen = set()
+        for did in ids:
+            if did is None:
+                continue
+            did_str = did if isinstance(did, str) else str(did)
+            if did_str in seen:
+                continue
+            dim = self._dimension_by_id(did_str)
+            if dim is None:
+                continue
+            filtered.append(did_str)
+            seen.add(did_str)
+        if filtered == self._selected_dimensions:
+            self._emit_selection_status()
+            return
+        self._selected_dimensions = filtered
+        self._emit_selection_status()
+        self.update()
+
+    def _apply_selection_results(
+        self,
+        shape_hits: Sequence[str],
+        dimension_hits: Sequence[str],
+        *,
+        additive: bool = False,
+        toggle: bool = False,
+    ) -> None:
+        shape_hits = [sid for sid in shape_hits if sid]
+        dim_hits = [did for did in dimension_hits if did]
+        shape_order = [shape.id for shape in self._shapes if shape.id]
+        dim_order = [getattr(dim, "id", None) for dim in self._dimensions if getattr(dim, "id", None)]
+
+        if toggle:
+            shape_set = set(self._selection)
+            for sid in shape_hits:
+                if sid in shape_set:
+                    shape_set.remove(sid)
+                else:
+                    shape_set.add(sid)
+            dim_set = set(self._selected_dimensions)
+            for did in dim_hits:
+                if did in dim_set:
+                    dim_set.remove(did)
+                else:
+                    dim_set.add(did)
+            self._set_selection([sid for sid in shape_order if sid in shape_set])
+            self._set_dimension_selection([did for did in dim_order if did in dim_set])
+            return
+
+        if additive:
+            shape_set = set(self._selection)
+            shape_set.update(shape_hits)
+            dim_set = set(self._selected_dimensions)
+            dim_set.update(dim_hits)
+            self._set_selection([sid for sid in shape_order if sid in shape_set])
+            self._set_dimension_selection([did for did in dim_order if did in dim_set])
+            return
+
+        target_shape_ids = set(shape_hits)
+        target_dim_ids = set(dim_hits)
+        self._set_selection([sid for sid in shape_order if sid in target_shape_ids])
+        self._set_dimension_selection([did for did in dim_order if did in target_dim_ids])
+
+    def get_selection(self) -> List[dict]:
+        payloads: List[dict] = []
+        for sid in self._selection:
+            shape = self._shape_by_id(sid)
+            if shape is None:
+                continue
+            payloads.append(self._shape_payload(shape))
+        return payloads
+
+    def get_selected_dimension_ids(self) -> List[str]:
+        return list(self._selected_dimensions)
+
+    def set_selection(self, payloads: Sequence[dict]) -> None:
+        ids: List[str] = []
+        for item in payloads:
+            sid = item.get("id")
+            if not sid:
+                continue
+            ids.append(str(sid))
+        self._set_selection(ids)
+
+    def update_scene(self, add_list: Sequence[dict], remove_list: Sequence[dict]) -> None:
+        if not add_list and not remove_list:
+            return
+        self._push_history()
+        prior_selection = list(self._selection)
+        remove_ids = {str(item["id"]) for item in remove_list if item.get("id")}
+        if remove_ids:
+            self._shapes = [shape for shape in self._shapes if shape.id not in remove_ids]
+        new_ids: List[str] = []
+        for payload in add_list:
+            shape = self._shape_from_payload(payload)
+            if shape.id and any(existing.id == shape.id for existing in self._shapes):
+                shape.id = None
+            if not shape.id:
+                shape.id = self._next_shape_id()
+            self._shapes.append(shape)
+            new_ids.append(shape.id)
+        target_selection = new_ids if new_ids else [sid for sid in prior_selection if sid not in remove_ids]
+        self._reseed_shape_counter()
+        self.update()
+        self._set_selection(target_selection)
+
+    def delete_items(
+        self,
+        remove_shapes: Sequence[dict],
+        remove_dimensions: Sequence[str],
+    ) -> Tuple[int, int]:
+        shape_ids = {str(item["id"]) for item in remove_shapes if item and item.get("id")}
+        dimension_ids = {str(did) for did in remove_dimensions if did}
+        if not shape_ids and not dimension_ids:
+            return (0, 0)
+        self._push_history()
+        if shape_ids:
+            self._shapes = [shape for shape in self._shapes if shape.id not in shape_ids]
+        if dimension_ids:
+            self._dimensions = [dim for dim in self._dimensions if getattr(dim, "id", None) not in dimension_ids]
+        self._reseed_shape_counter()
+        self.update()
+        remaining_shapes = [sid for sid in self._selection if sid not in shape_ids]
+        remaining_dims = [did for did in self._selected_dimensions if did not in dimension_ids]
+        self._set_selection(remaining_shapes)
+        self._set_dimension_selection(remaining_dims)
+        return (len(shape_ids), len(dimension_ids))
+
+    def _shape_payload(self, shape: Shape) -> dict:
+        data = self._serialize_shape(shape)
+        data["id"] = shape.id
+        data["source_type"] = shape.type
+        if shape.type == "piacircle":
+            data["type"] = "piacircle"
+            if shape.center is not None:
+                data["center"] = [float(shape.center[0]), float(shape.center[1])]
+            if shape.radius is not None:
+                data["radius"] = float(shape.radius)
+        elif shape.type == "piacurve":
+            data["type"] = "curve"
+            if shape.control_points:
+                data["control_points"] = [list(pt) for pt in shape.control_points]
+        elif shape.type == "polyline":
+            data["type"] = "polyline"
+        else:
+            data["type"] = shape.type
+        return data
+
+    def _shape_from_payload(self, payload: dict) -> Shape:
+        params = dict(payload.get("params") or self._params)
+        payload_type = payload.get("type") or payload.get("source_type") or "polyline"
+        source_type = payload.get("source_type")
+        if payload_type == "piacircle" or source_type == "piacircle":
+            center = tuple(payload.get("center", (0.0, 0.0)))
+            radius = float(payload.get("radius", 0.0))
+            points_data = payload.get("points")
+            if not points_data:
+                points_data = circle_points(center, radius, params, samples=256)
+            points = np.array(points_data, dtype=float)
+            return Shape(
+                type="piacircle",
+                params=params,
+                points=points,
+                center=(float(center[0]), float(center[1])),
+                radius=float(radius),
+                control_points=None,
+                id=payload.get("id"),
+            )
+        if payload_type in ("curve", "piacurve"):
+            pts = payload.get("points") or []
+            points = np.array(pts, dtype=float)
+            ctrl = payload.get("control_points")
+            control_points = [tuple(pt) for pt in ctrl] if ctrl else None
+            shape_type = source_type or "piacurve"
+            return Shape(
+                type=shape_type,
+                params=params,
+                points=points,
+                control_points=control_points,
+                id=payload.get("id"),
+            )
+        if payload_type == "segment":
+            p1 = tuple(payload.get("p1", (0.0, 0.0)))
+            p2 = tuple(payload.get("p2", (0.0, 0.0)))
+            pts = [p1, p2]
+        else:
+            pts = payload.get("points") or []
+        points = np.array(pts, dtype=float)
+        shape_type = source_type or ("polyline" if payload_type in ("polyline", "segment") else payload_type)
+        if not shape_type:
+            shape_type = "polyline"
+        return Shape(
+            type=shape_type,
+            params=params,
+            points=points,
+            control_points=None,
+            id=payload.get("id"),
+        )
+
+    def pointer_tool_name(self) -> Optional[str]:
+        return self._pointer_tool_name
+
+    def set_pointer_tool(self, name: Optional[str], tool: Optional[object]) -> None:
+        if self._pointer_tool is tool and self._pointer_tool_name == name:
+            return
+        if self._pointer_tool and hasattr(self._pointer_tool, "deactivate"):
+            self._pointer_tool.deactivate()
+        self._pointer_tool = tool
+        self._pointer_tool_name = name
+        if tool is not None:
+            self.setFocus()
+
+    def clear_pointer_tool(self) -> None:
+        if self._pointer_tool and hasattr(self._pointer_tool, "deactivate"):
+            self._pointer_tool.deactivate()
+        self._pointer_tool = None
+        self._pointer_tool_name = None
+
+    def _dispatch_pointer_event(self, handler: str, event) -> bool:
+        if self._pointer_tool is None:
+            return False
+        callback = getattr(self._pointer_tool, handler, None)
+        if callback is None:
+            return False
+        callback(event)
+        return True
 
     def _shape_metrics(self, shape: Shape) -> Dict[str, Optional[float]]:
         if shape.type == "piacircle":
@@ -624,6 +1256,20 @@ class Canvas(QWidget):
             if len(control_points) >= 3:
                 metrics["area"] = curve_area(control_points, params)
             return metrics
+        if shape.type == "polyline":
+            pts = shape.points if shape.points is not None else np.zeros((0, 2), dtype=float)
+            if pts.shape[0] < 2:
+                span = 0.0
+            else:
+                span = math.dist(pts[0], pts[-1])
+            params = shape.params
+            metrics = {
+                "radius": span / 2.0 if span > 0.0 else 0.0,
+                "pi_a": pi_a(max(span, 1e-6), **params),
+                "arc_length": polyline_length(pts),
+                "area": polygon_area(pts) if pts.shape[0] >= 3 else None,
+            }
+            return metrics
         return {"radius": None, "pi_a": None, "arc_length": None, "area": None}
 
     # ------------------------------------------------------------------
@@ -637,12 +1283,13 @@ class Canvas(QWidget):
         if self._snap_to_grid:
             self._draw_grid(painter)
 
+        selected_ids = set(self._selection)
         for idx, shape in enumerate(self._shapes):
             if shape.points is None or len(shape.points) < 2:
                 continue
             color = QColor(30, 30, 30)
             width = 2
-            if idx == self._selected_index:
+            if shape.id and shape.id in selected_ids:
                 color = QColor(50, 120, 215)
                 width = 3
             self._draw_shape(painter, shape, color, width)
@@ -651,6 +1298,16 @@ class Canvas(QWidget):
             self._draw_shape(painter, self._temp_shape, QColor(200, 80, 80), 2, dashed=True)
 
         self._paint_dimensions(painter)
+        if self._selection_rect is not None:
+            x0, y0, x1, y1 = self._selection_rect
+            rect = QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
+            pen = QPen(QColor(50, 120, 215), 1, Qt.DashLine)
+            brush = QColor(50, 120, 215, 40)
+            painter.setPen(pen)
+            painter.setBrush(brush)
+            painter.drawRect(rect)
+
+        self._draw_osnap_indicator(painter)
 
     def _draw_shape(self, painter: QPainter, shape: Shape, color: QColor, width: int, dashed: bool = False) -> None:
         pen = QPen(color, width)
@@ -667,6 +1324,52 @@ class Canvas(QWidget):
             painter.setPen(QPen(QColor(120, 120, 120), 4))
             for pt in controls:
                 painter.drawPoint(pt)
+
+    def _draw_osnap_indicator(self, painter: QPainter) -> None:
+        if not self._last_osnap:
+            return
+        kind, point = self._last_osnap
+        x, y = point
+        painter.save()
+        painter.translate(float(x), float(y))
+        base_color = QColor(50, 120, 215)
+        pen = QPen(base_color, 2)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        size = 6.0
+
+        if kind == "end":
+            painter.drawLine(-size, -size, size, size)
+            painter.drawLine(-size, size, size, -size)
+        elif kind == "mid":
+            painter.setBrush(QColor(base_color.red(), base_color.green(), base_color.blue(), 60))
+            painter.drawRect(QRectF(-size, -size, size * 2, size * 2))
+        elif kind == "center":
+            painter.drawEllipse(QPointF(0.0, 0.0), size, size)
+            painter.drawEllipse(QPointF(0.0, 0.0), size * 0.35, size * 0.35)
+        elif kind in {"quad", "90"}:
+            points = [
+                QPointF(0.0, -size),
+                QPointF(size, 0.0),
+                QPointF(0.0, size),
+                QPointF(-size, 0.0),
+            ]
+            polygon = QPolygonF(points + [points[0]])
+            painter.drawPolyline(polygon)
+        elif kind == "appint":
+            painter.drawLine(-size * 1.2, 0.0, size * 1.2, 0.0)
+            painter.drawLine(0.0, -size * 1.2, 0.0, size * 1.2)
+            painter.drawLine(-size, -size, size, size)
+            painter.drawLine(-size, size, size, -size)
+        elif kind in {"perp", "closest"}:
+            painter.drawLine(-size, 0.0, size, 0.0)
+            painter.drawLine(0.0, 0.0, 0.0, size)
+            painter.drawLine(0.0, 0.0, size * 0.7, -size * 0.7)
+        elif kind == "dim":
+            painter.drawRect(QRectF(-size, -size, size * 2, size * 2))
+        else:
+            painter.drawEllipse(QPointF(0.0, 0.0), size * 0.8, size * 0.8)
+        painter.restore()
 
     def _paint_dimensions(self, painter: QPainter) -> None:
         if not self._show_dimensions or not self._dimensions:
@@ -750,12 +1453,13 @@ class Canvas(QWidget):
         return {
             "params": dict(self._params),
             "shapes": [self._serialize_shape(s) for s in self._shapes],
-            "selected": self._selected_index,
+            "selection": list(self._selection),
             "snap": bool(self._snap_to_grid),
             "grid": int(self._grid_size),
             "dimensions": dims_to_json(self._dimensions),
             "dimension_style": self._dim_style.asdict(),
             "show_dimensions": self._show_dimensions,
+            "dimension_selection": list(self._selected_dimensions),
         }
 
     def _restore(self, snap: dict) -> None:
@@ -780,11 +1484,25 @@ class Canvas(QWidget):
             self._dim_style = DimStyle(**style_data)
         self._show_dimensions = bool(snap.get("show_dimensions", self._show_dimensions))
         self._reseed_shape_counter()
-        self._selected_index = snap.get("selected")
+        raw_selection = snap.get("selection")
+        if raw_selection is None:
+            legacy = snap.get("selected")
+            if legacy is None:
+                raw_selection = []
+            elif isinstance(legacy, list):
+                raw_selection = legacy
+            else:
+                raw_selection = [legacy]
+        if not isinstance(raw_selection, list):
+            raw_selection = [raw_selection]
+        self._set_selection(raw_selection)
+        dim_selection = snap.get("dimension_selection", [])
+        if not isinstance(dim_selection, list):
+            dim_selection = []
+        self._set_dimension_selection(dim_selection)
         self._apply_snap_state(snap.get("snap", self._snap_to_grid), emit=False)
         self._grid_size = int(snap.get("grid", self._grid_size))
         self.update()
-        self._emit_selection_status()
         self.snap_changed.emit(self._snap_to_grid)
         self.dimensions_visibility_changed.emit(self._show_dimensions)
 
@@ -820,18 +1538,26 @@ class Canvas(QWidget):
     # ------------------------------------------------------------------
     # Event forwarding to the active tool
     def mousePressEvent(self, event):  # pragma: no cover - GUI entry point
+        if self._dispatch_pointer_event("mouse_press", event):
+            return
         if self._tool is not None:
             self._tool.mouse_press(event)
 
     def mouseMoveEvent(self, event):  # pragma: no cover - GUI entry point
+        if self._dispatch_pointer_event("mouse_move", event):
+            return
         if self._tool is not None:
             self._tool.mouse_move(event)
 
     def mouseReleaseEvent(self, event):  # pragma: no cover - GUI entry point
+        if self._dispatch_pointer_event("mouse_release", event):
+            return
         if self._tool is not None:
             self._tool.mouse_release(event)
 
     def keyPressEvent(self, event):  # pragma: no cover - GUI entry point
+        if self._dispatch_pointer_event("key_press", event):
+            return
         if self._tool is not None:
             self._tool.key_press(event)
         else:
