@@ -7,15 +7,15 @@ Integrate by forwarding mouse events from your Canvas to the active tool.
 from __future__ import annotations
 from typing import Tuple, Optional, Callable, List
 from dataclasses import dataclass
-from .dimensions import LinearDimension, RadialDimension, AngularDimension, DimStyle, linear_label, radial_label, angular_label
-from .osnap import osnap_pick
+from dimensions import LinearDimension, RadialDimension, AngularDimension, DimStyle, linear_label, radial_label, angular_label
+from osnap import osnap_pick
 
 Point = Tuple[float, float]
 
 @dataclass
 class ToolContext:
-    params: dict                    # {"α":..., "μ":..., "k0":...}
-    style: DimStyle
+    get_params: Callable[[], dict]
+    get_style: Callable[[], DimStyle]
     add_dimension: Callable[[object], None]
     update_status: Callable[[str], None]
     request_repaint: Callable[[], None]
@@ -30,7 +30,7 @@ class DimLinearTool:
         self.p2: Optional[Point] = None
         self.offset: Optional[Point] = None
 
-    def on_mouse_press(self, ev):
+    def mouse_press(self, ev):
         p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
         if self.p1 is None:
             self.p1 = p
@@ -40,15 +40,28 @@ class DimLinearTool:
             self.ctx.update_status("LinearDim: place label")
         else:
             self.offset = p
-            # Create dimension
-            lab = linear_label(self.p1, self.p2, self.ctx.style)
+            style = self.ctx.get_style()
+            lab = linear_label(self.p1, self.p2, style)
             did = f"D{abs(hash((self.p1,self.p2,self.offset)))%10**6}"
-            dim = LinearDimension(id=did, p1=self.p1, p2=self.p2, offset=self.offset, style=self.ctx.style)
+            dim = LinearDimension(id=did, p1=self.p1, p2=self.p2, offset=self.offset, style=DimStyle(**style.asdict()))
             self.ctx.add_dimension(dim)
             self.ctx.update_status(f"LinearDim: {lab}")
             # reset
             self.p1 = self.p2 = self.offset = None
         self.ctx.request_repaint()
+
+    def deactivate(self):
+        self.p1 = self.p2 = self.offset = None
+        self.ctx.update_status("")
+
+    def mouse_move(self, ev):  # unused but keeps interface parity
+        return None
+
+    def mouse_release(self, ev):
+        return None
+
+    def key_press(self, ev):
+        return None
 
 class DimRadialTool:
     def __init__(self, ctx: ToolContext):
@@ -58,7 +71,7 @@ class DimRadialTool:
         self.attach: Optional[Point] = None
         self.shape_id: Optional[str] = None
 
-    def on_mouse_press(self, ev):
+    def mouse_press(self, ev):
         p = self.ctx.world_from_event(ev)
         if self.center is None:
             res = self.ctx.hit_test_circle(p)
@@ -69,13 +82,40 @@ class DimRadialTool:
             self.ctx.update_status("RadialDim: click to place label")
         else:
             self.attach = p
-            lab = radial_label(self.center, self.radius, self.ctx.style, self.ctx.params)
+            style = self.ctx.get_style()
+            params = self.ctx.get_params()
+            params_copy = dict(params)
+            lab = radial_label(self.center, self.radius, style, params_copy)
             did = f"D{abs(hash((self.center,self.radius,self.attach)))%10**6}"
-            dim = RadialDimension(id=did, center=self.center, radius=self.radius, attach=self.attach, style=self.ctx.style, shape_ref=self.shape_id)
+            dim = RadialDimension(
+                id=did,
+                center=self.center,
+                radius=self.radius,
+                attach=self.attach,
+                style=DimStyle(**style.asdict()),
+                shape_ref=self.shape_id,
+                params=params_copy,
+            )
             self.ctx.add_dimension(dim)
             self.ctx.update_status(f"RadialDim: {lab}")
             self.center = self.radius = self.attach = self.shape_id = None
         self.ctx.request_repaint()
+
+    def deactivate(self):
+        self.center = None
+        self.radius = None
+        self.attach = None
+        self.shape_id = None
+        self.ctx.update_status("")
+
+    def mouse_move(self, ev):  # placeholder for potential previews
+        return None
+
+    def mouse_release(self, ev):
+        return None
+
+    def key_press(self, ev):
+        return None
 
 class DimAngularTool:
     def __init__(self, ctx: ToolContext):
@@ -85,7 +125,7 @@ class DimAngularTool:
         self.p2: Optional[Point] = None
         self.attach: Optional[Point] = None
 
-    def on_mouse_press(self, ev):
+    def mouse_press(self, ev):
         p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
         if self.vtx is None:
             self.vtx = p
@@ -98,21 +138,48 @@ class DimAngularTool:
             self.ctx.update_status("AngularDim: place label")
         else:
             self.attach = p
-            lab = angular_label(self.vtx, self.p1, self.p2, self.ctx.style)
+            style = self.ctx.get_style()
+            lab = angular_label(self.vtx, self.p1, self.p2, style)
             did = f"D{abs(hash((self.vtx,self.p1,self.p2,self.attach)))%10**6}"
-            dim = AngularDimension(id=did, vtx=self.vtx, p1=self.p1, p2=self.p2, attach=self.attach, style=self.ctx.style)
+            dim = AngularDimension(id=did, vtx=self.vtx, p1=self.p1, p2=self.p2, attach=self.attach, style=DimStyle(**style.asdict()))
             self.ctx.add_dimension(dim)
             self.ctx.update_status(f"AngularDim: {lab}")
             self.vtx = self.p1 = self.p2 = self.attach = None
         self.ctx.request_repaint()
+
+    def deactivate(self):
+        self.vtx = self.p1 = self.p2 = self.attach = None
+        self.ctx.update_status("")
+
+    def mouse_move(self, ev):
+        return None
+
+    def mouse_release(self, ev):
+        return None
+
+    def key_press(self, ev):
+        return None
 
 class MeasureTool:
     def __init__(self, ctx: ToolContext):
         self.ctx = ctx
         self.last: Optional[str] = None
 
-    def on_mouse_move(self, ev):
+    def mouse_move(self, ev):
         p = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
         # Basic measure: nearest segment length or angle if 3 picks are retained; minimal demo
         # For v0.1, just show cursor world coords (extend later to arc/area as needed)
         self.ctx.update_status(f"X={p[0]:.3f}, Y={p[1]:.3f}")
+
+    def mouse_press(self, ev):
+        return None
+
+    def mouse_release(self, ev):
+        return None
+
+    def key_press(self, ev):
+        return None
+
+    def deactivate(self):
+        self.last = None
+        self.ctx.update_status("")

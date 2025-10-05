@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, asdict
 from typing import Tuple, Optional, Literal, Dict, Any, List
 
-from .geometry import angle_deg, euclid_len, radial_label as geom_radial_label, format_length as geom_format_length
+from geometry import angle_deg, euclid_len, radial_label as geom_radial_label, format_length as geom_format_length
 
 Point = Tuple[float, float]
 Mode = Literal["euclid", "pi_a", "both"]
@@ -69,9 +69,10 @@ class RadialDimension:
     attach: Point       # label anchor position in world coords
     style: DimStyle
     shape_ref: Optional[str] = None  # optional link to a circle id
+    params: Optional[Dict[str, float]] = None
 
     def asdict(self) -> Dict[str, Any]:
-        return {
+        data = {
             "type": "radial",
             "id": self.id,
             "center": list(self.center),
@@ -80,6 +81,9 @@ class RadialDimension:
             "style": self.style.asdict(),
             "shape_ref": self.shape_ref,
         }
+        if self.params is not None:
+            data["params"] = dict(self.params)
+        return data
 
 @dataclass
 class AngularDimension:
@@ -130,7 +134,8 @@ def from_json(items: List[Dict[str, Any]]) -> List[object]:
                 radius=float(it["radius"]),
                 attach=tuple(it["attach"]),
                 style=style,
-                shape_ref=it.get("shape_ref")
+                shape_ref=it.get("shape_ref"),
+                params=it.get("params"),
             ))
         elif typ == "angular":
             dims.append(AngularDimension(
@@ -150,8 +155,8 @@ def linear_label(p1: Point, p2: Point, style: DimStyle) -> str:
     lab = format_length(L, style)
     return lab
 
-def radial_label(_center: Point, radius: float, style: DimStyle, params: Dict[str, float]) -> str:
-    return geom_radial_label(radius, params, style)
+def radial_label(_center: Point, radius: float, style: DimStyle, params: Optional[Dict[str, float]]) -> str:
+    return geom_radial_label(radius, params or {}, style)
 
 def angular_label(vtx: Point, p1: Point, p2: Point, style: DimStyle) -> str:
     a = angle_deg(vtx, p1, p2)

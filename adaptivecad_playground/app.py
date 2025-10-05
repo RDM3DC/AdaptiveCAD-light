@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QAction, QActionGroup, QIcon
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QStatusBar, QToolBar
 
 from widgets import Canvas, Controls
@@ -26,6 +27,7 @@ class Main(QMainWindow):
         self._status_labels: dict[str, QLabel] = {}
         self._tool_actions: dict[str, QAction] = {}
         self._snap_action: QAction | None = None
+        self._dims_action: QAction | None = None
         self._setup_status_bar()
         self._make_toolbar()
         self._make_menu()
@@ -33,6 +35,7 @@ class Main(QMainWindow):
         self.canvas.status_changed.connect(self._on_status_changed)
         self.canvas.tool_changed.connect(self._on_tool_changed)
         self.canvas.snap_changed.connect(self._on_snap_changed)
+        self.canvas.dimensions_visibility_changed.connect(self._on_dimensions_visibility_changed)
 
         self.resize(1200, 800)
         self.canvas.set_tool("select")
@@ -68,6 +71,7 @@ class Main(QMainWindow):
     def _make_toolbar(self) -> None:
         toolbar = QToolBar("Tools")
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(24, 24))
         self.addToolBar(Qt.LeftToolBarArea, toolbar)
 
         action_group = QActionGroup(self)
@@ -75,12 +79,21 @@ class Main(QMainWindow):
 
         self._tool_actions = {}
         definitions = (
-            ("select", "Select", "Select tool: click shapes to inspect metrics."),
-            ("piacircle", "PiA Circle", "πₐ Circle: first click center, second click sets radius."),
-            ("piacurve", "PiA Curve", "πₐ Curve: click control points, Enter to finish."),
+            ("select", "Select", "Select tool: click shapes to inspect metrics.", None),
+            ("piacircle", "πₐ Circle", "πₐ Circle: first click center, second click sets radius.", None),
+            ("piacurve", "πₐ Curve", "πₐ Curve: click control points, Enter to finish.", None),
+            ("dim_linear", "Linear Dim", "Linear dimension: three clicks to place an aligned measurement.", "dim_linear.svg"),
+            ("dim_radial", "Radial Dim", "Radial dimension: click a πₐ circle, then place the label.", "dim_radial.svg"),
+            ("dim_angular", "Angular Dim", "Angular dimension: vertex, ray A, ray B, then label.", "dim_angular.svg"),
+            ("measure", "Measure", "Measure tool: hover to read world coordinates.", "measure.svg"),
         )
-        for name, text, tip in definitions:
-            action = toolbar.addAction(text)
+        for name, text, tip, icon_name in definitions:
+            if icon_name:
+                action = QAction(self._load_icon(icon_name), text, self)
+                toolbar.addAction(action)
+            else:
+                action = QAction(text, self)
+                toolbar.addAction(action)
             action.setCheckable(True)
             action.setActionGroup(action_group)
             action.triggered.connect(lambda checked, n=name: self._activate_tool(n, checked))
@@ -124,6 +137,15 @@ class Main(QMainWindow):
         self._snap_action.setToolTip("Toggle snapping drawing points to the grid.")
         self._snap_action.setStatusTip("Toggle snapping drawing points to the grid.")
 
+        self._dims_action = view_menu.addAction("Show Dimensions")
+        self._dims_action.setCheckable(True)
+        self._dims_action.setChecked(self.canvas.dimensions_visible())
+        self._dims_action.setToolTip("Toggle dimension annotations on the canvas.")
+        self._dims_action.setStatusTip("Toggle dimension annotations on the canvas.")
+        self._dims_action.triggered.connect(
+            lambda checked: self.canvas.set_dimensions_visible(bool(checked))
+        )
+
     # ------------------------------------------------------------------
     # Event handlers
     def _activate_tool(self, name: str, checked: bool) -> None:
@@ -136,6 +158,10 @@ class Main(QMainWindow):
             "select": "Select",
             "piacircle": "PiA Circle",
             "piacurve": "PiA Curve",
+            "dim_linear": "Linear Dim",
+            "dim_radial": "Radial Dim",
+            "dim_angular": "Angular Dim",
+            "measure": "Measure",
         }.get(name, name.title())
         self._mode_label.setText(f"Tool: {text}")
         action = self._tool_actions.get(name)
@@ -145,6 +171,12 @@ class Main(QMainWindow):
             action.blockSignals(blocked)
 
     def _on_status_changed(self, payload: dict) -> None:
+        message = payload.get("message")
+        if message is not None:
+            if message:
+                self.statusBar().showMessage(message, 4000)
+            else:
+                self.statusBar().clearMessage()
         radius = payload.get("radius")
         pi_value = payload.get("pi_a")
         arc = payload.get("arc_length")
@@ -166,6 +198,19 @@ class Main(QMainWindow):
         blocked = self._snap_action.blockSignals(True)
         self._snap_action.setChecked(bool(enabled))
         self._snap_action.blockSignals(blocked)
+
+    def _on_dimensions_visibility_changed(self, visible: bool) -> None:
+        if self._dims_action is None:
+            return
+        blocked = self._dims_action.blockSignals(True)
+        self._dims_action.setChecked(bool(visible))
+        self._dims_action.blockSignals(blocked)
+
+    def _load_icon(self, filename: str) -> QIcon:
+        icon_path = Path(__file__).with_name("icons") / filename
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+        return QIcon()
 
 
 def main() -> int:
