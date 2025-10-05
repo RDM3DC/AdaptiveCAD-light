@@ -153,8 +153,21 @@ def angle_deg(vertex: Sequence[float], p1: Sequence[float], p2: Sequence[float])
 
 
 def format_length(length: float, units: str, precision: int) -> str:
+    factor = unit_factor(units)
     suffix = f" {units}" if units else ""
-    return f"{length:.{precision}f}{suffix}"
+    return f"{length * factor:.{precision}f}{suffix}"
+
+
+def unit_factor(units: str) -> float:
+    match units:
+        case "in" | "":
+            return 1.0
+        case "mm":
+            return 25.4
+        case "ft":
+            return 1.0 / 12.0
+        case _:
+            return 1.0
 
 
 def radial_label(radius: float, params: dict | None, style) -> str:
@@ -162,19 +175,20 @@ def radial_label(radius: float, params: dict | None, style) -> str:
     precision = int(getattr(style, "precision", 2))
     units = str(getattr(style, "units", ""))
     mode = getattr(style, "mode", "both")
-    suffix = f" {units}" if units else ""
 
-    parts: list[str] = [f"R={radius:.{precision}f}{suffix}"]
+    parts: list[str] = [
+        f"R={format_length(radius, units, precision)}"
+    ]
 
-    local_params = _normalize_params(params)
-    circ_pi_a = arc_length(radius, local_params)
+    circ_pi_a = arc_length(radius, params)
     circ_euclid = 2.0 * math.pi * radius
 
     if mode == "pi_a":
-        parts.append(f"Cₐ={circ_pi_a:.{precision}f}{suffix}")
+        parts.append(f"Cₐ={format_length(circ_pi_a, units, precision)}")
     elif mode == "both":
-        parts.append(f"C={circ_euclid:.{precision}f}{suffix}")
+        parts.append(f"C={format_length(circ_euclid, units, precision)}")
         if abs(circ_pi_a - circ_euclid) > 10 ** (-precision):
-            parts.append(f"Cₐ={circ_pi_a:.{precision}f}{suffix}")
-    # Euclid mode omits circumference extras
+            parts.append(f"Cₐ={format_length(circ_pi_a, units, precision)}")
+    elif mode == "euclid":
+        parts.append(f"C={format_length(circ_euclid, units, precision)}")
     return " · ".join(parts)
