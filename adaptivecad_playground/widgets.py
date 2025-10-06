@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from adaptive_fields import AdaptiveMetricManager
 from geometry import (
     arc_length,
     area,
@@ -300,6 +301,8 @@ class Canvas(QWidget):
         self._temp_shape: Optional[Shape] = None
         self._shape_counter: int = 1
 
+        self._metrics = AdaptiveMetricManager()
+
         # Dimensions
         self._dimensions: List[object] = []
         self._show_dimensions: bool = True
@@ -332,6 +335,11 @@ class Canvas(QWidget):
         for group, kinds in self._osnap_groups.items():
             for kind in kinds:
                 self._osnap_kind_to_group[kind] = group
+        # Viewport (pan/zoom)
+        self._view_origin: List[float] = [0.0, 0.0]
+        self._view_scale: float = 1.0
+        self._view_min_scale: float = 0.2
+        self._view_max_scale: float = 5.0
 
         # History stacks
         self._undo_stack = []
@@ -340,6 +348,7 @@ class Canvas(QWidget):
 
         self._emit_default_status()
         self.dimensions_visibility_changed.emit(self._show_dimensions)
+        self._rebuild_adaptive_fields()
 
     # ------------------------------------------------------------------
     # Parameter management
@@ -348,6 +357,78 @@ class Canvas(QWidget):
 
     def params(self) -> Params:
         return dict(self._params)
+
+    def _rebuild_adaptive_fields(self) -> None:
+        self._metrics.rebuild(self._shapes)
+
+    def curvature_at(self, point: Point) -> float:
+        return self._metrics.curvature(point)
+
+    def memory_at(self, point: Point) -> float:
+        return self._metrics.memory(point)
+
+    def pi_a_at(self, point: Point, radius: float, params: Optional[Params] = None) -> float:
+        return self._metrics.pi_a(point, radius, params or self._params)
+
+    # ------------------------------------------------------------------
+    # View transforms
+    def world_to_screen(self, point: Point) -> Point:
+        ox, oy = self._view_origin
+        scale = self._view_scale
+        return ((point[0] - ox) * scale, (point[1] - oy) * scale)
+
+    def screen_to_world(self, point: Point) -> Point:
+        ox, oy = self._view_origin
+        scale = self._view_scale
+        return (ox + point[0] / scale, oy + point[1] / scale)
+
+    def _visible_world_rect(self) -> Tuple[float, float, float, float]:
+        top_left = self.screen_to_world((0.0, 0.0))
+        bottom_right = self.screen_to_world((float(self.width()), float(self.height())))
+        x0 = min(top_left[0], bottom_right[0])
+        x1 = max(top_left[0], bottom_right[0])
+        y0 = min(top_left[1], bottom_right[1])
+        y1 = max(top_left[1], bottom_right[1])
+        return (x0, y0, x1, y1)
+
+    def _apply_zoom(self, target_scale: float, pivot_screen: Optional[Point]) -> None:
+        target_scale = max(self._view_min_scale, min(self._view_max_scale, target_scale))
+        if abs(target_scale - self._view_scale) <= 1e-9:
+            return
+        if pivot_screen is None:
+            pivot_screen = (self.width() / 2.0, self.height() / 2.0)
+        pivot_world = self.screen_to_world(pivot_screen)
+        self._view_scale = target_scale
+        self._view_origin[0] = pivot_world[0] - pivot_screen[0] / target_scale
+        self._view_origin[1] = pivot_world[1] - pivot_screen[1] / target_scale
+        self.update()
+
+    def zoom_by(self, factor: float, pivot_screen: Optional[Point] = None) -> None:
+        self._apply_zoom(self._view_scale * factor, pivot_screen)
+
+    def zoom_reset(self) -> None:
+        self._view_scale = 1.0
+        self._view_origin = [0.0, 0.0]
+        self.update()
+
+    def _handle_zoom_shortcut(self, event) -> bool:
+        modifiers = event.modifiers()
+        if not (modifiers & Qt.ControlModifier):
+            return False
+        key = event.key()
+        if key in (Qt.Key_Plus, Qt.Key_Equal):
+            self.zoom_by(1.2)
+            event.accept()
+            return True
+        if key in (Qt.Key_Minus, Qt.Key_Underscore):
+            self.zoom_by(1.0 / 1.2)
+            event.accept()
+            return True
+        if key == Qt.Key_0:
+            self.zoom_reset()
+            event.accept()
+            return True
+        return False
 
     def osnap_groups(self) -> Dict[str, bool]:
         return {name: name in self._enabled_osnap_groups for name in self._osnap_groups}
@@ -420,7 +501,8 @@ class Canvas(QWidget):
 
     def snap_point(self, pt: Point) -> Point:
         x, y = float(pt[0]), float(pt[1])
-        snapped, kind = osnap_pick((x, y), self.osnap_targets(), tol=float(self._osnap_tolerance))
+        tol_world = float(self._osnap_tolerance) / max(self._view_scale, 1e-9)
+        snapped, kind = osnap_pick((x, y), self.osnap_targets(), tol=tol_world)
         snapped_pt = (float(snapped[0]), float(snapped[1]))
         state_changed = False
         if kind:
@@ -441,8 +523,9 @@ class Canvas(QWidget):
         return (round(x / g) * g, round(y / g) * g)
 
     def world_from_event(self, event) -> Point:
-        point = (event.position().x(), event.position().y())
-        return self.snap_point(point)
+        screen_pt = (event.position().x(), event.position().y())
+        world_pt = self.screen_to_world(screen_pt)
+        return self.snap_point(world_pt)
 
     def _apply_snap_state(self, enabled: bool, emit: bool) -> None:
         enabled = bool(enabled)
@@ -514,6 +597,9 @@ class Canvas(QWidget):
             hit_test_circle=self.hit_test_circle,
             world_from_event=self.world_from_event,
             osnap_targets=self.osnap_targets,
+            sample_curvature=self.curvature_at,
+            sample_memory=self.memory_at,
+            sample_pi_a=lambda pt, radius, params=None: self.pi_a_at(pt, radius, params),
         )
 
     # ------------------------------------------------------------------
@@ -553,6 +639,7 @@ class Canvas(QWidget):
         shape = self.shape_from_circle(center, radius, self._params)
         shape.id = self._next_shape_id()
         self._shapes.append(shape)
+        self._rebuild_adaptive_fields()
         self._set_selection([shape.id])
         self.update()
 
@@ -563,6 +650,7 @@ class Canvas(QWidget):
         shape = self.shape_from_curve(control_points, self._params)
         shape.id = self._next_shape_id()
         self._shapes.append(shape)
+        self._rebuild_adaptive_fields()
         self._set_selection([shape.id])
         self.update()
 
@@ -604,7 +692,8 @@ class Canvas(QWidget):
 
     def select_shape_at(self, point: Point, *, additive: bool = False, toggle: bool = False) -> None:
         self.clear_selection_rect()
-        shape_id = self._hit_test_shape(point)
+        world_pt = self.screen_to_world(point)
+        shape_id = self._hit_test_shape(world_pt)
         if shape_id is None:
             if not additive and not toggle:
                 self._apply_selection_results([], [], additive=False, toggle=False)
@@ -613,11 +702,12 @@ class Canvas(QWidget):
 
     def select_items_at(self, point: Point, *, additive: bool = False, toggle: bool = False) -> None:
         self.clear_selection_rect()
-        shape_id = self._hit_test_shape(point)
+        world_pt = self.screen_to_world(point)
+        shape_id = self._hit_test_shape(world_pt)
         if shape_id:
             self._apply_selection_results([shape_id], [], additive=additive, toggle=toggle)
             return
-        dim_id = self._dimension_hit_test(point)
+        dim_id = self._dimension_hit_test(world_pt)
         if dim_id:
             self._apply_selection_results([], [dim_id], additive=additive, toggle=toggle)
             return
@@ -647,7 +737,9 @@ class Canvas(QWidget):
         x0, y0, x1, y1 = rect
         if abs(x1 - x0) < 1e-3 or abs(y1 - y0) < 1e-3:
             return None
-        return rect
+        world_a = self.screen_to_world((x0, y0))
+        world_b = self.screen_to_world((x1, y1))
+        return (world_a[0], world_a[1], world_b[0], world_b[1])
 
     def clear_selection_rect(self) -> None:
         if self._selection_rect is None and self._selection_drag_origin is None:
@@ -838,13 +930,14 @@ class Canvas(QWidget):
     def hit_test_circle(self, point: Point) -> Optional[Tuple[Point, float, str]]:
         best: Optional[Tuple[Point, float, str]] = None
         best_error = float("inf")
+        tol = 12.0 / max(self._view_scale, 1e-6)
         for shape in self._shapes:
             if shape.type != "piacircle" or shape.center is None or shape.radius is None:
                 continue
             cx, cy = shape.center
             radius = float(shape.radius)
             error = abs(math.hypot(point[0] - cx, point[1] - cy) - radius)
-            if error < best_error and error <= 12.0:
+            if error < best_error and error <= tol:
                 if not shape.id:
                     shape.id = self._next_shape_id()
                 best = (shape.center, radius, shape.id)
@@ -948,6 +1041,8 @@ class Canvas(QWidget):
             "pi_a": None,
             "arc_length": None,
             "area": None,
+            "curvature": None,
+            "memory": None,
             "message": "",
         }
         self.status_changed.emit(dict(self._status_state))
@@ -976,6 +1071,8 @@ class Canvas(QWidget):
                 "pi_a": None,
                 "arc_length": None,
                 "area": None,
+                "curvature": None,
+                "memory": None,
                 "message": message,
             }
         )
@@ -1106,6 +1203,7 @@ class Canvas(QWidget):
             new_ids.append(shape.id)
         target_selection = new_ids if new_ids else [sid for sid in prior_selection if sid not in remove_ids]
         self._reseed_shape_counter()
+        self._rebuild_adaptive_fields()
         self.update()
         self._set_selection(target_selection)
 
@@ -1124,6 +1222,7 @@ class Canvas(QWidget):
         if dimension_ids:
             self._dimensions = [dim for dim in self._dimensions if getattr(dim, "id", None) not in dimension_ids]
         self._reseed_shape_counter()
+        self._rebuild_adaptive_fields()
         self.update()
         remaining_shapes = [sid for sid in self._selection if sid not in shape_ids]
         remaining_dims = [did for did in self._selected_dimensions if did not in dimension_ids]
@@ -1230,47 +1329,71 @@ class Canvas(QWidget):
         callback(event)
         return True
 
+    def _shape_centroid(self, shape: Shape) -> Optional[Point]:
+        pts = shape.points
+        if pts is None or len(pts) == 0:
+            return None
+        arr = np.asarray(pts, dtype=float)
+        return (float(np.mean(arr[:, 0])), float(np.mean(arr[:, 1])))
+
     def _shape_metrics(self, shape: Shape) -> Dict[str, Optional[float]]:
+        params = shape.params
+        metrics: Dict[str, Optional[float]] = {
+            "radius": None,
+            "pi_a": None,
+            "arc_length": None,
+            "area": None,
+            "curvature": None,
+            "memory": None,
+        }
+        sample_point: Optional[Point] = None
+        radius_for_pi: Optional[float] = None
+
         if shape.type == "piacircle":
             radius = shape.radius or 0.0
-            params = shape.params
-            return {
-                "radius": radius,
-                "pi_a": pi_a(radius, **params),
-                "arc_length": arc_length(radius, params),
-                "area": area(radius, params),
-            }
-        if shape.type == "piacurve":
+            metrics["radius"] = radius
+            metrics["arc_length"] = arc_length(radius, params)
+            metrics["area"] = area(radius, params)
+            sample_point = shape.center if shape.center is not None else self._shape_centroid(shape)
+            radius_for_pi = radius
+        elif shape.type == "piacurve":
             control_points = shape.control_points or []
-            if len(control_points) < 2:
-                span = 0.0
-            else:
+            if len(control_points) >= 2:
                 span = math.dist(control_points[0], control_points[-1])
-            params = shape.params
-            metrics = {
-                "radius": span / 2.0 if span > 0.0 else 0.0,
-                "pi_a": pi_a(max(span, 1e-6), **params),
-                "arc_length": curve_arc_length(control_points, params),
-                "area": None,
-            }
+            else:
+                span = 0.0
+            metrics["radius"] = span / 2.0 if span > 0.0 else 0.0
+            metrics["arc_length"] = curve_arc_length(control_points, params)
             if len(control_points) >= 3:
                 metrics["area"] = curve_area(control_points, params)
-            return metrics
-        if shape.type == "polyline":
+            sample_point = self._shape_centroid(shape)
+            radius_for_pi = max(span, 1e-6)
+        elif shape.type == "polyline":
             pts = shape.points if shape.points is not None else np.zeros((0, 2), dtype=float)
-            if pts.shape[0] < 2:
-                span = 0.0
-            else:
+            if pts.shape[0] >= 2:
                 span = math.dist(pts[0], pts[-1])
-            params = shape.params
-            metrics = {
-                "radius": span / 2.0 if span > 0.0 else 0.0,
-                "pi_a": pi_a(max(span, 1e-6), **params),
-                "arc_length": polyline_length(pts),
-                "area": polygon_area(pts) if pts.shape[0] >= 3 else None,
-            }
-            return metrics
-        return {"radius": None, "pi_a": None, "arc_length": None, "area": None}
+            else:
+                span = 0.0
+            metrics["radius"] = span / 2.0 if span > 0.0 else 0.0
+            metrics["arc_length"] = polyline_length(pts)
+            metrics["area"] = polygon_area(pts) if pts.shape[0] >= 3 else None
+            sample_point = self._shape_centroid(shape)
+            radius_for_pi = max(span, 1e-6) if span > 0.0 else 1.0
+
+        if sample_point is None and shape.points is not None and len(shape.points) >= 1:
+            sample_point = self._shape_centroid(shape)
+
+        if sample_point is not None:
+            metrics["curvature"] = self.curvature_at(sample_point)
+            metrics["memory"] = self.memory_at(sample_point)
+            if radius_for_pi is None:
+                radius_for_pi = max(metrics["radius"] or 0.0, 1.0)
+            metrics["pi_a"] = self.pi_a_at(sample_point, radius_for_pi, params)
+        else:
+            radius_value = metrics["radius"]
+            if radius_value is not None:
+                metrics["pi_a"] = pi_a(max(radius_value, 1e-6), **params)
+        return metrics
 
     # ------------------------------------------------------------------
     # Painting
@@ -1314,12 +1437,18 @@ class Canvas(QWidget):
         if dashed:
             pen.setStyle(Qt.DashLine)
         painter.setPen(pen)
-        points = [QPointF(float(x), float(y)) for x, y in shape.points]
+        points = []
+        for x, y in shape.points:
+            sx, sy = self.world_to_screen((float(x), float(y)))
+            points.append(QPointF(sx, sy))
         painter.drawPolyline(points)
         if shape.type == "piacurve" and shape.control_points:
             handle_pen = QPen(QColor(120, 120, 120), 1, Qt.DotLine)
             painter.setPen(handle_pen)
-            controls = [QPointF(float(x), float(y)) for x, y in shape.control_points]
+            controls = []
+            for x, y in shape.control_points:
+                sx, sy = self.world_to_screen((float(x), float(y)))
+                controls.append(QPointF(sx, sy))
             painter.drawPolyline(controls)
             painter.setPen(QPen(QColor(120, 120, 120), 4))
             for pt in controls:
@@ -1329,7 +1458,7 @@ class Canvas(QWidget):
         if not self._last_osnap:
             return
         kind, point = self._last_osnap
-        x, y = point
+        x, y = self.world_to_screen(point)
         painter.save()
         painter.translate(float(x), float(y))
         base_color = QColor(50, 120, 215)
@@ -1375,13 +1504,16 @@ class Canvas(QWidget):
         if not self._show_dimensions or not self._dimensions:
             return
         shim = _DimensionPainter(painter)
-        to_screen = lambda x, y: (float(x), float(y))
+        to_screen = lambda x, y: self.world_to_screen((float(x), float(y)))
         shape_lookup = {shape.id: shape for shape in self._shapes if shape.id}
         for dim in self._dimensions:
             style = dim.style if hasattr(dim, "style") else self._dim_style
             color = getattr(style, "color", "#222222")
             arrow_px = float(getattr(style, "arrow", 8.0))
             text_px = float(getattr(style, "text_height", 12.0))
+            dim_id = getattr(dim, "id", None)
+            if dim_id and dim_id in self._selected_dimensions:
+                color = "#3278d7"
             if isinstance(dim, LinearDimension):
                 label = linear_label(dim.p1, dim.p2, style)
                 draw_linear_dim(
@@ -1427,25 +1559,51 @@ class Canvas(QWidget):
                 )
 
     def _draw_grid(self, painter: QPainter) -> None:
-        g = self._grid_size
-        if g <= 0:
+        g = float(self._grid_size)
+        if g <= 0.0:
             return
-        rect = self.rect()
-        left, top, right, bottom = rect.left(), rect.top(), rect.right(), rect.bottom()
+        scale = self._view_scale
+        if scale <= 0.0:
+            return
         pen_minor = QPen(QColor(235, 235, 235), 1)
         pen_major = QPen(QColor(220, 220, 220), 1)
-        # vertical lines
-        x = (left // g) * g
-        while x <= right:
-            painter.setPen(pen_major if (x % (g * 5) == 0) else pen_minor)
-            painter.drawLine(int(x), top, int(x), bottom)
-            x += g
-        # horizontal lines
-        y = (top // g) * g
-        while y <= bottom:
-            painter.setPen(pen_major if (y % (g * 5) == 0) else pen_minor)
-            painter.drawLine(left, int(y), right, int(y))
-            y += g
+        pen_minor.setCosmetic(True)
+        pen_major.setCosmetic(True)
+
+        x0, y0, x1, y1 = self._visible_world_rect()
+        width = self.width()
+        height = self.height()
+        base_spacing = g * scale
+        skip_minor = base_spacing < 6.0
+        skip_major = base_spacing < 3.0
+
+        start_idx_x = int(math.floor(x0 / g))
+        end_idx_x = int(math.ceil(x1 / g))
+        for idx in range(start_idx_x, end_idx_x + 1):
+            if skip_major and idx % 10 != 0:
+                continue
+            if skip_minor and idx % 5 != 0:
+                continue
+            world_x = idx * g
+            screen_x, _ = self.world_to_screen((world_x, 0.0))
+            if screen_x < -2.0 or screen_x > width + 2.0:
+                continue
+            painter.setPen(pen_major if idx % 5 == 0 else pen_minor)
+            painter.drawLine(int(round(screen_x)), 0, int(round(screen_x)), height)
+
+        start_idx_y = int(math.floor(y0 / g))
+        end_idx_y = int(math.ceil(y1 / g))
+        for idx in range(start_idx_y, end_idx_y + 1):
+            if skip_major and idx % 10 != 0:
+                continue
+            if skip_minor and idx % 5 != 0:
+                continue
+            world_y = idx * g
+            _, screen_y = self.world_to_screen((0.0, world_y))
+            if screen_y < -2.0 or screen_y > height + 2.0:
+                continue
+            painter.setPen(pen_major if idx % 5 == 0 else pen_minor)
+            painter.drawLine(0, int(round(screen_y)), width, int(round(screen_y)))
 
     # ------------------------------------------------------------------
     # History (Undo/Redo)
@@ -1483,6 +1641,7 @@ class Canvas(QWidget):
         if style_data:
             self._dim_style = DimStyle(**style_data)
         self._show_dimensions = bool(snap.get("show_dimensions", self._show_dimensions))
+        self._rebuild_adaptive_fields()
         self._reseed_shape_counter()
         raw_selection = snap.get("selection")
         if raw_selection is None:
@@ -1537,6 +1696,20 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------------
     # Event forwarding to the active tool
+    def wheelEvent(self, event):  # pragma: no cover - GUI entry point
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta == 0:
+                event.accept()
+                return
+            steps = delta / 120.0
+            factor = 1.2 ** steps
+            pivot = (event.position().x(), event.position().y())
+            self.zoom_by(factor, pivot)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
     def mousePressEvent(self, event):  # pragma: no cover - GUI entry point
         if self._dispatch_pointer_event("mouse_press", event):
             return
@@ -1556,6 +1729,8 @@ class Canvas(QWidget):
             self._tool.mouse_release(event)
 
     def keyPressEvent(self, event):  # pragma: no cover - GUI entry point
+        if self._handle_zoom_shortcut(event):
+            return
         if self._dispatch_pointer_event("key_press", event):
             return
         if self._tool is not None:

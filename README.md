@@ -5,7 +5,9 @@ Interactive PySide6 sandbox for experimenting with curvature-adaptive geometry. 
 ## Features
 - πₐ Circle and πₐ Curve tools with live previews.
 - Parameter sliders for α, μ, and k₀.
+- Adaptive curvature and material memory field sampling; hover with Measure to inspect `kappa`, `pi_a`, and memory values.
 - Snap-to-grid toggle (on by default) with grid overlay.
+- Zoom controls: `Ctrl` + mouse wheel, `Ctrl` + `+` / `-`, and `Ctrl+0` to reset.
 - Undo/redo shortcuts (`Ctrl+Z` / `Ctrl+Y`).
 - PNG and JSON export (JSON captures shapes, params, snap settings).
 
@@ -23,6 +25,7 @@ adaptivecad_playground/
   app.py          # Main window and menus
   widgets.py      # Canvas, controls, grid, history
   tools.py        # Interactive tools (select/circle/curve)
+  adaptive_fields.py # Curvature/material field synthesis for πₐ metrics
   geometry.py     # πₐ math helpers and sampling routines
 assets/
   README.txt      # Placeholder for icons

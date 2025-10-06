@@ -116,8 +116,7 @@ class PiACircleTool(ToolBase):
     def mouse_press(self, event):
         if event.button() != Qt.LeftButton:
             return
-        point = (event.position().x(), event.position().y())
-        point = self.canvas.snap_point(point)
+        point = self.canvas.world_from_event(event)
         if self._center is None:
             self._center = point
             preview = self.canvas.shape_from_circle(point, 0.0, self.canvas.params())
@@ -134,8 +133,7 @@ class PiACircleTool(ToolBase):
     def mouse_move(self, event):
         if self._center is None:
             return
-        point = (event.position().x(), event.position().y())
-        point = self.canvas.snap_point(point)
+        point = self.canvas.world_from_event(event)
         radius = math.hypot(point[0] - self._center[0], point[1] - self._center[1])
         preview = self.canvas.shape_from_circle(self._center, radius, self.canvas.params())
         self.canvas.set_temp_shape(preview)
@@ -156,8 +154,7 @@ class PiACurveTool(ToolBase):
     def mouse_press(self, event):
         if event.button() != Qt.LeftButton:
             return
-        point = (event.position().x(), event.position().y())
-        point = self.canvas.snap_point(point)
+        point = self.canvas.world_from_event(event)
         self._control_points.append(point)
         self._hover_point = None
         self._update_preview()
@@ -165,8 +162,7 @@ class PiACurveTool(ToolBase):
     def mouse_move(self, event):
         if not self._control_points:
             return
-        self._hover_point = (event.position().x(), event.position().y())
-        self._hover_point = self.canvas.snap_point(self._hover_point)
+        self._hover_point = self.canvas.world_from_event(event)
         self._update_preview()
 
     def key_press(self, event):

@@ -22,6 +22,9 @@ class ToolContext:
     hit_test_circle: Callable[[Point], Optional[Tuple[Point, float, str]]]  # returns (center, radius, shape_id) if a circle is under cursor
     world_from_event: Callable[[object], Point]  # mouse event -> world (x,y)
     osnap_targets: Callable[[], List[Tuple[str, Any]]]  # named points or descriptors for snapping
+    sample_curvature: Callable[[Point], float]
+    sample_memory: Callable[[Point], float]
+    sample_pi_a: Callable[[Point, float, Optional[dict]], float]
 
 class DimLinearTool:
     def __init__(self, ctx: ToolContext):
@@ -167,9 +170,13 @@ class MeasureTool:
 
     def mouse_move(self, ev):
         p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
-    # Basic measure: nearest segment length or angle if 3 picks are retained; minimal demo
-        # For v0.1, just show cursor world coords (extend later to arc/area as needed)
-        self.ctx.update_status(f"X={p[0]:.3f}, Y={p[1]:.3f}")
+        params = self.ctx.get_params()
+        curvature = self.ctx.sample_curvature(p)
+        memory = self.ctx.sample_memory(p)
+        pia_value = self.ctx.sample_pi_a(p, 1.0, params)
+        self.ctx.update_status(
+            f"X={p[0]:.3f}, Y={p[1]:.3f}, kappa≈{curvature:.4f}, pi_a≈{pia_value:.4f}, memory≈{memory:.4f}"
+        )
 
     def mouse_press(self, ev):
         return None

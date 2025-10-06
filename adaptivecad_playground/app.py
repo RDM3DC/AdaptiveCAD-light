@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QAction, QActionGroup, QIcon
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QStatusBar, QToolBar
 
 from edit_tools import BreakTool, EditCtx, ExtendTool, JoinTool, TrimTool
@@ -73,15 +73,19 @@ class Main(QMainWindow):
 
         self._status_labels = {
             "radius": QLabel("r: --"),
-            "pi_a":     QLabel("pi_a: --"),
+            "pi_a": QLabel("pi_a: --"),
             "arc_length": QLabel("arc: --"),
-            "area":    QLabel("area: --"),
+            "area": QLabel("area: --"),
+            "curvature": QLabel("kappa: --"),
+            "memory": QLabel("memory: --"),
         }
         status_help = {
             "radius": "Radius: distance for selected πₐ circle or proxy span.",
             "pi_a": "Local πₐ value computed with current parameters.",
             "arc_length": "Arc length of the adaptive circle/curve.",
             "area": "Area enclosed (when defined for the selection).",
+            "curvature": "Curvature field sample at the selection centroid.",
+            "memory": "Material memory field intensity at the selection centroid.",
         }
         for key, label in self._status_labels.items():
             label.setToolTip(status_help.get(key, ""))
@@ -188,6 +192,26 @@ class Main(QMainWindow):
             lambda checked: self.canvas.set_dimensions_visible(bool(checked))
         )
 
+        view_menu.addSeparator()
+
+        zoom_in_action = view_menu.addAction("Zoom In")
+        zoom_in_action.setShortcut(QKeySequence.ZoomIn)
+        zoom_in_action.triggered.connect(lambda: self.canvas.zoom_by(1.2))
+        zoom_in_action.setToolTip("Zoom in around the canvas center.")
+        zoom_in_action.setStatusTip("Zoom in around the canvas center.")
+
+        zoom_out_action = view_menu.addAction("Zoom Out")
+        zoom_out_action.setShortcut(QKeySequence.ZoomOut)
+        zoom_out_action.triggered.connect(lambda: self.canvas.zoom_by(1.0 / 1.2))
+        zoom_out_action.setToolTip("Zoom out around the canvas center.")
+        zoom_out_action.setStatusTip("Zoom out around the canvas center.")
+
+        zoom_reset_action = view_menu.addAction("Reset Zoom")
+        zoom_reset_action.setShortcut("Ctrl+0")
+        zoom_reset_action.triggered.connect(self.canvas.zoom_reset)
+        zoom_reset_action.setToolTip("Reset the viewport to the default zoom.")
+        zoom_reset_action.setStatusTip("Reset the viewport to the default zoom.")
+
     # ------------------------------------------------------------------
     # Event handlers
     def _activate_tool(self, name: str, checked: bool) -> None:
@@ -225,11 +249,15 @@ class Main(QMainWindow):
         pi_value = payload.get("pi_a")
         arc = payload.get("arc_length")
         area_value = payload.get("area")
+        curvature = payload.get("curvature")
+        memory_value = payload.get("memory")
 
         self._status_labels["radius"].setText(self._format_value("r", radius, precision=2))
         self._status_labels["pi_a"].setText(self._format_value("pi_a", pi_value, precision=4))
         self._status_labels["arc_length"].setText(self._format_value("arc", arc, precision=2))
         self._status_labels["area"].setText(self._format_value("area", area_value, precision=2))
+        self._status_labels["curvature"].setText(self._format_value("kappa", curvature, precision=4))
+        self._status_labels["memory"].setText(self._format_value("memory", memory_value, precision=4))
 
     def _format_value(self, label: str, value: float | None, precision: int) -> str:
         if value is None:
