@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -52,6 +54,8 @@ from dimensions import (
 from dim_draw import draw_linear_dim, draw_radial_dim, draw_angular_dim
 from dim_tools import ToolContext, DimAngularTool, DimLinearTool, DimRadialTool, MeasureTool
 from osnap import osnap_pick
+from sora_background import BGMode, SoraBackground
+from sora_hud import HudTheme, SoraHud
 from tools import PiACircleTool, PiACurveTool, SelectTool
 
 Point = Tuple[float, float]
@@ -346,9 +350,65 @@ class Canvas(QWidget):
         self._redo_stack = []
         self._status_state: Dict[str, Optional[float | str]] = {}
 
+        # Visual layers
+        self.bg = SoraBackground()
+        self.bg.set_mode(BGMode.GRID_SCAN)
+        self.hud = SoraHud(HudTheme())
+        self.hud.set_status("SORA OFF")
+        self.hud.set_hints(
+            [
+                ("Tip: Press L for Linear Dim", 0.05),
+                ("Hold Shift to snap", 0.28),
+                ("PiA mode: Compare labels", 0.66),
+            ]
+        )
+        self._anim_start = time.monotonic()
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(16)
+        self._anim_timer.timeout.connect(self.update)
+        self._anim_timer.start()
+        self._load_visual_config()
+
         self._emit_default_status()
         self.dimensions_visibility_changed.emit(self._show_dimensions)
         self._rebuild_adaptive_fields()
+
+    def _load_visual_config(self) -> None:
+        config_path = Path(__file__).with_name("demo_background_config.json")
+        if not config_path.exists():
+            return
+        try:
+            with config_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return
+
+        hud_enabled = data.get("hud_enabled")
+        if hud_enabled is not None:
+            self.hud.set_enabled(bool(hud_enabled))
+
+        hud_status = data.get("hud_status")
+        if isinstance(hud_status, str) and hud_status.strip():
+            self.hud.set_status(hud_status)
+
+        hints = data.get("hints")
+        if isinstance(hints, list):
+            parsed: List[Tuple[str, float]] = []
+            for entry in hints:
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    try:
+                        parsed.append((str(entry[0]), float(entry[1])))
+                    except (ValueError, TypeError):
+                        continue
+            if parsed:
+                self.hud.set_hints(parsed)
+
+        mode_name = data.get("background_mode")
+        if isinstance(mode_name, str):
+            try:
+                self.bg.set_mode(BGMode[mode_name.upper()])
+            except KeyError:
+                pass
 
     # ------------------------------------------------------------------
     # Parameter management
@@ -480,6 +540,40 @@ class Canvas(QWidget):
 
     def toggle_dimensions_visible(self) -> None:
         self.set_dimensions_visible(not self._show_dimensions)
+
+    # ------------------------------------------------------------------
+    # Visual layers (HUD + Background)
+    def hud_enabled(self) -> bool:
+        return self.hud.is_enabled()
+
+    def set_hud_enabled(self, enabled: bool) -> None:
+        target = bool(enabled)
+        if self.hud.is_enabled() == target:
+            return
+        self.hud.set_enabled(target)
+        self.update()
+
+    def set_hud_status(self, status: str) -> None:
+        self.hud.set_status(status)
+        self.update()
+
+    def hud_status(self) -> str:
+        return self.hud.status()
+
+    def set_hud_hints(self, hints: Sequence[Tuple[str, float]]) -> None:
+        self.hud.set_hints(hints)
+        self.update()
+
+    def background_mode(self) -> BGMode:
+        return self.bg.mode()
+
+    def set_background_mode(self, mode: BGMode) -> None:
+        if not isinstance(mode, BGMode):
+            raise TypeError("mode must be an instance of BGMode.")
+        if self.bg.mode() is mode:
+            return
+        self.bg.set_mode(mode)
+        self.update()
 
     # ------------------------------------------------------------------
     # Snap/grid control
@@ -1400,10 +1494,12 @@ class Canvas(QWidget):
     def paintEvent(self, event):  # pragma: no cover - GUI entry point
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor(250, 250, 250))
+        elapsed = max(0.0, time.monotonic() - self._anim_start)
+        self.bg.draw_background(painter, self.rect(), elapsed)
 
         # Draw grid if enabled
-        if self._snap_to_grid:
+        gridless_modes = {BGMode.GRID_SCAN, BGMode.SORA2, BGMode.VIDEO}
+        if self._snap_to_grid and self.bg.mode() not in gridless_modes:
             self._draw_grid(painter)
 
         selected_ids = set(self._selection)
@@ -1431,6 +1527,7 @@ class Canvas(QWidget):
             painter.drawRect(rect)
 
         self._draw_osnap_indicator(painter)
+        self.hud.draw_hud(painter, self.rect(), elapsed)
 
     def _draw_shape(self, painter: QPainter, shape: Shape, color: QColor, width: int, dashed: bool = False) -> None:
         pen = QPen(color, width)
@@ -1618,6 +1715,10 @@ class Canvas(QWidget):
             "dimension_style": self._dim_style.asdict(),
             "show_dimensions": self._show_dimensions,
             "dimension_selection": list(self._selected_dimensions),
+            "background_mode": self.bg.mode().name,
+            "hud_enabled": self.hud.is_enabled(),
+            "hud_status": self.hud.status(),
+            "hud_hints": self.hud.hints(),
         }
 
     def _restore(self, snap: dict) -> None:
@@ -1643,6 +1744,31 @@ class Canvas(QWidget):
         self._show_dimensions = bool(snap.get("show_dimensions", self._show_dimensions))
         self._rebuild_adaptive_fields()
         self._reseed_shape_counter()
+        mode_name = snap.get("background_mode")
+        if isinstance(mode_name, str):
+            try:
+                self.bg.set_mode(BGMode[mode_name.upper()])
+            except KeyError:
+                pass
+        hud_enabled = snap.get("hud_enabled")
+        if hud_enabled is not None:
+            self.hud.set_enabled(bool(hud_enabled))
+        hud_status = snap.get("hud_status")
+        if isinstance(hud_status, str) and hud_status.strip():
+            self.hud.set_status(hud_status)
+        hud_hints = snap.get("hud_hints")
+        if isinstance(hud_hints, list):
+            parsed_hints: List[Tuple[str, float]] = []
+            for entry in hud_hints:
+                if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    try:
+                        parsed_hints.append((str(entry[0]), float(entry[1])))
+                    except (ValueError, TypeError):
+                        continue
+            if parsed_hints:
+                self.hud.set_hints(parsed_hints)
+            else:
+                self.hud.set_hints([])
         raw_selection = snap.get("selection")
         if raw_selection is None:
             legacy = snap.get("selected")
@@ -1755,6 +1881,10 @@ class Canvas(QWidget):
             "params": dict(self._params),
             "snap_to_grid": self._snap_to_grid,
             "grid_size": self._grid_size,
+            "background_mode": self.bg.mode().name,
+            "hud_enabled": self.hud.is_enabled(),
+            "hud_status": self.hud.status(),
+            "hud_hints": self.hud.hints(),
             "shapes": [self._serialize_shape(shape) for shape in self._shapes],
             "dimensions": dims_to_json(self._dimensions),
             "dimension_style": self._dim_style.asdict(),

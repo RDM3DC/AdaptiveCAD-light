@@ -1,0 +1,10 @@
+{
+  "hud_enabled": true,
+  "hud_status": "SORA OFF",
+  "background_mode": "GRID_SCAN",
+  "hints": [
+    ["Tip: Press L for Linear Dim", 0.05],
+    ["Hold Shift to snap", 0.28],
+    ["PiA mode: Compare labels", 0.66]
+  ]
+}

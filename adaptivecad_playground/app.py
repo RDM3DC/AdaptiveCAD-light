@@ -1,6 +1,7 @@
 """Application bootstrap for the AdaptiveCAD Playground."""
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence
 from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QStatusBar, QToolBar
 
 from edit_tools import BreakTool, EditCtx, ExtendTool, JoinTool, TrimTool
+from sora2_client import Sora2Client, Sora2Config
+from sora_background import BGMode
 from widgets import Canvas, Controls
 
 
@@ -30,6 +33,15 @@ class Main(QMainWindow):
         self._snap_action: QAction | None = None
         self._dims_action: QAction | None = None
         self._pointer_actions: dict[str, QAction] = {}
+        self._hud_action: QAction | None = None
+        self._bg_actions: dict[BGMode, QAction] = {}
+        self._bg_action_group: QActionGroup | None = None
+        self._sora_client = Sora2Client(Sora2Config(api_key=os.getenv("SORA2_API_KEY")))
+        if self._sora_client.is_configured():
+            self.canvas.set_hud_status("SORA READY")
+        self.canvas.bg.set_sora_message(
+            "Toggle Sora 2 mode once OpenAI publishes the streaming API; using local visuals until then."
+        )
         self._edit_ctx = EditCtx(
             tol=12.0,
             get_selection=self.canvas.get_selection,
@@ -192,6 +204,32 @@ class Main(QMainWindow):
             lambda checked: self.canvas.set_dimensions_visible(bool(checked))
         )
 
+        hud_action = QAction(self._load_icon("hud_toggle.svg"), "Show HUD", self)
+        hud_action.setCheckable(True)
+        hud_action.setChecked(self.canvas.hud_enabled())
+        hud_action.triggered.connect(self._toggle_hud)
+        hud_action.setToolTip("Toggle the futuristic HUD overlay.")
+        hud_action.setStatusTip("Toggle the futuristic HUD overlay.")
+        view_menu.addAction(hud_action)
+        self._hud_action = hud_action
+
+        bg_menu = view_menu.addMenu(self._load_icon("bg_toggle.svg"), "Background Mode")
+        bg_menu.setToolTip("Choose the adaptive background style.")
+        bg_menu.setStatusTip("Choose the adaptive background style.")
+        self._bg_action_group = QActionGroup(self)
+        self._bg_action_group.setExclusive(True)
+        self._bg_actions.clear()
+        for mode in BGMode:
+            label = mode.name.replace("_", " ").title()
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setActionGroup(self._bg_action_group)
+            action.triggered.connect(lambda checked, m=mode: self._handle_background_action(checked, m))
+            bg_menu.addAction(action)
+            self._bg_actions[mode] = action
+        self._sync_background_menu()
+        self._sync_hud_menu()
+
         view_menu.addSeparator()
 
         zoom_in_action = view_menu.addAction("Zoom In")
@@ -211,6 +249,35 @@ class Main(QMainWindow):
         zoom_reset_action.triggered.connect(self.canvas.zoom_reset)
         zoom_reset_action.setToolTip("Reset the viewport to the default zoom.")
         zoom_reset_action.setStatusTip("Reset the viewport to the default zoom.")
+
+    def _toggle_hud(self, checked: bool) -> None:
+        self.canvas.set_hud_enabled(bool(checked))
+        self._sync_hud_menu()
+
+    def _handle_background_action(self, checked: bool, mode: BGMode) -> None:
+        if not checked:
+            return
+        self._set_background_mode(mode)
+
+    def _set_background_mode(self, mode: BGMode) -> None:
+        self.canvas.set_background_mode(mode)
+        self._sync_background_menu()
+
+    def _sync_background_menu(self) -> None:
+        if not self._bg_actions:
+            return
+        current = self.canvas.background_mode()
+        for mode, action in self._bg_actions.items():
+            prev = action.blockSignals(True)
+            action.setChecked(mode is current)
+            action.blockSignals(prev)
+
+    def _sync_hud_menu(self) -> None:
+        if not self._hud_action:
+            return
+        prev = self._hud_action.blockSignals(True)
+        self._hud_action.setChecked(self.canvas.hud_enabled())
+        self._hud_action.blockSignals(prev)
 
     # ------------------------------------------------------------------
     # Event handlers

@@ -1,0 +1,13 @@
+<svg width="160" height="48" viewBox="0 0 160 48" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="badge" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#062240"/>
+      <stop offset="100%" stop-color="#0a3c63"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="152" height="40" rx="12" ry="12" fill="url(#badge)" stroke="#00d4ff" stroke-width="2"/>
+  <circle cx="26" cy="24" r="7" fill="#27ffc9"/>
+  <path d="M122 20 L138 20 L130 32 Z" fill="#00d4ff" opacity=".8"/>
+  <text x="64" y="31" font-size="20" font-family="Orbitron, sans-serif" font-weight="600" fill="#e8fcff">SORA</text>
+  <text x="100" y="31" font-size="14" font-family="sans-serif" fill="#79f0ff">HUD</text>
+</svg>

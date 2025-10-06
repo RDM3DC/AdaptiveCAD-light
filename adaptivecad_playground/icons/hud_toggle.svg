@@ -1,0 +1,14 @@
+<svg width="128" height="128" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#00f4ff" stop-opacity=".85"/>
+      <stop offset="100%" stop-color="#004b66" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="64" cy="64" r="56" fill="url(#glow)"/>
+  <circle cx="64" cy="64" r="46" fill="none" stroke="#00d4ff" stroke-width="6"/>
+  <circle cx="64" cy="64" r="34" fill="none" stroke="#00ffff" stroke-width="2" stroke-dasharray="6 8"/>
+  <path d="M64 24 L70 30 L64 36 L58 30 Z" fill="#00f9ff"/>
+  <path d="M64 100 L70 94 L64 88 L58 94 Z" fill="#00f9ff"/>
+  <text x="64" y="70" font-size="18" text-anchor="middle" fill="#e9faff" font-family="sans-serif">HUD</text>
+</svg>
