@@ -1,9 +1,4 @@
-"""FastAPI entry point for AdaptiveCAD-Lite.
-
-This module exposes lightweight endpoints that ChatGPT can call to
-prototype pi_a and ARP geometry workflows. The actual geometry generation
-is stubbed until the analytic kernels are integrated.
-"""
+"""FastAPI entry point for AdaptiveCAD-Lite."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -17,12 +12,9 @@ APP_VERSION = "0.1.0"
 APP_BUILD = "lite"
 
 app = FastAPI(
-    title="AdaptiveCAD-Lite",
-    description=(
-        "Prototype API for generating adaptive pi_a geometry, listing available "
-        "shape templates, and returning quick metadata summaries."
-    ),
+    title="AdaptiveCAD Lite API",
     version=APP_VERSION,
+    description="Generate adaptive pi_a and ARP geometry via lightweight endpoints.",
 )
 
 
@@ -79,8 +71,8 @@ AVAILABLE_SHAPES: Dict[str, ShapeDescription] = {
 SUPPORTED_OUTPUTS = {"stl", "svg", "png"}
 
 
-def _validate_shape_request(req: ShapeRequest) -> None:
-    """Raise an HTTP 400 if the requested shape or output is not supported."""
+def _validate_request(req: ShapeRequest) -> None:
+    """Ensure the caller requests a known template and artifact type."""
 
     if req.type not in AVAILABLE_SHAPES:
         raise HTTPException(status_code=400, detail=f"Unknown shape type '{req.type}'.")
@@ -88,8 +80,8 @@ def _validate_shape_request(req: ShapeRequest) -> None:
         raise HTTPException(status_code=400, detail=f"Unsupported output '{req.output}'.")
 
 
-@app.get("/version", summary="Return build metadata for AdaptiveCAD-Lite.")
-def version() -> Dict[str, str]:
+@app.get("/version")
+async def get_version() -> Dict[str, str]:
     """Expose lightweight build and status metadata."""
 
     return {
@@ -100,18 +92,18 @@ def version() -> Dict[str, str]:
     }
 
 
-@app.get("/list_shapes", response_model=Dict[str, List[str]])
-def list_shapes() -> Dict[str, List[str]]:
+@app.get("/list_shapes")
+async def list_shapes() -> Dict[str, List[str]]:
     """Return identifiers for currently available shape templates."""
 
-    return {"available_shapes": list(AVAILABLE_SHAPES.keys())}
+    return {"available_shapes": list(AVAILABLE_SHAPES)}
 
 
-@app.post("/generate_shape", summary="Generate a shape artifact.")
-def generate_shape(req: ShapeRequest) -> Dict[str, Any]:
+@app.post("/generate_shape")
+async def generate_shape(req: ShapeRequest) -> Dict[str, Any]:
     """Stubbed geometry generator; returns deterministic metadata for now."""
 
-    _validate_shape_request(req)
+    _validate_request(req)
     shape_id = str(uuid.uuid4())
     artifact_path = f"https://adaptivecad.com/assets/{shape_id}.{req.output}"
 
@@ -125,8 +117,8 @@ def generate_shape(req: ShapeRequest) -> Dict[str, Any]:
     }
 
 
-@app.get("/describe_shape", response_model=ShapeDescription)
-def describe_shape(shape_type: str) -> ShapeDescription:
+@app.get("/describe_shape")
+async def describe_shape(shape_type: str) -> ShapeDescription:
     """Return qualitative metadata about the selected shape template."""
 
     description = AVAILABLE_SHAPES.get(shape_type)
