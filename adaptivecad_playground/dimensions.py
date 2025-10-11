@@ -50,6 +50,7 @@ class LinearDimension:
     p2: Point = field(default_factory=lambda: (0.0, 0.0))
     offset: Point = field(default_factory=lambda: (0.0, 0.0))  # label anchor position in world coords
     style: DimStyle = field(default_factory=DimStyle)
+    params: Optional[Dict[str, float]] = field(default_factory=dict)
 
     def asdict(self) -> Dict[str, Any]:
         return {
@@ -59,6 +60,7 @@ class LinearDimension:
             "p2": list(self.p2),
             "offset": list(self.offset),
             "style": self.style.asdict(),
+            "params": dict(self.params or {}),
         }
 
 @dataclass
@@ -125,7 +127,8 @@ def from_json(items: List[Dict[str, Any]]) -> List[object]:
                 p1=tuple(it["p1"]),
                 p2=tuple(it["p2"]),
                 offset=tuple(it["offset"]),
-                style=style
+                style=style,
+                params=it.get("params") or {},
             ))
         elif typ == "radial":
             dims.append(RadialDimension(
@@ -150,10 +153,19 @@ def from_json(items: List[Dict[str, Any]]) -> List[object]:
 
 # ---- Label builders --------------------------------------------------------
 
-def linear_label(p1: Point, p2: Point, style: DimStyle) -> str:
+def linear_label(p1: Point, p2: Point, style: DimStyle, adaptive_length: Optional[float] = None) -> str:
     L = euclid_len(p1, p2)
-    lab = format_length(L, style)
-    return lab
+    base = format_length(L, style)
+    mode = getattr(style, "mode", "both")
+    if adaptive_length is None or mode == "euclid":
+        return base
+    adaptive_formatted = format_length(adaptive_length, style)
+    if mode == "pi_a":
+        return f"Lₐ={adaptive_formatted}"
+    # both
+    if abs(adaptive_length - L) <= 10 ** (-style.precision):
+        return base
+    return f"L={base} · Lₐ={adaptive_formatted}"
 
 def radial_label(_center: Point, radius: float, style: DimStyle, params: Optional[Dict[str, float]]) -> str:
     return geom_radial_label(radius, params or {}, style)

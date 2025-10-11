@@ -7,9 +7,14 @@ the demo. They can be swapped out for higher fidelity kernels later on.
 from __future__ import annotations
 
 import math
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, Optional
 
 import numpy as np
+
+try:  # Optional GPU acceleration for heavy previews
+    import cupy as cp  # type: ignore
+except Exception:  # pragma: no cover - fallback when CuPy unavailable
+    cp = None
 
 
 def _normalize_params(params: dict | None) -> dict:
@@ -69,7 +74,33 @@ def _bezier_sample(control_points: np.ndarray, t: np.ndarray) -> np.ndarray:
     return pts[:, 0, :]
 
 
-def curve_points(control_points: Iterable[Sequence[float]], params: dict | None, samples: int = 256) -> np.ndarray:
+def _bezier_sample_gpu(control_points: np.ndarray, t: np.ndarray, device: Optional[int]) -> np.ndarray:
+    """GPU-accelerated Bezier evaluation when CuPy is available."""
+    if cp is None:
+        return _bezier_sample(control_points, t)
+    if control_points.shape[0] == 0:
+        return np.zeros((len(t), 2))
+    device_id = int(device) if device is not None else 0
+    with cp.cuda.Device(device_id):
+        ctrl = cp.asarray(control_points, dtype=cp.float64)
+        if ctrl.shape[0] == 1:
+            repeated = cp.repeat(ctrl[None, :], len(t), axis=0)
+            return cp.asnumpy(repeated)
+        ts = cp.asarray(t, dtype=cp.float64)
+        pts = cp.broadcast_to(ctrl, (len(ts),) + ctrl.shape).copy()
+        for _ in range(1, ctrl.shape[0]):
+            pts = (1.0 - ts)[:, None, None] * pts[:, :-1, :] + ts[:, None, None] * pts[:, 1:, :]
+        return cp.asnumpy(pts[:, 0, :])
+
+
+def curve_points(
+    control_points: Iterable[Sequence[float]],
+    params: dict | None,
+    samples: int = 256,
+    *,
+    prefer_gpu: bool = False,
+    gpu_device: Optional[int] = None,
+) -> np.ndarray:
     """Sample a Bezier-like adaptive curve defined by ``control_points``."""
     control_points = np.asarray(list(control_points), dtype=float)
     if control_points.shape[0] < 2:
@@ -81,6 +112,11 @@ def curve_points(control_points: Iterable[Sequence[float]], params: dict | None,
     exponent = float(np.clip(ratio, 0.5, 1.5))
     t = np.linspace(0.0, 1.0, samples)
     warped_t = np.clip(t ** exponent, 0.0, 1.0)
+    if prefer_gpu and cp is not None:
+        try:
+            return _bezier_sample_gpu(control_points, warped_t, gpu_device)
+        except Exception:  # pragma: no cover - GPU fallback safety
+            return _bezier_sample(control_points, warped_t)
     return _bezier_sample(control_points, warped_t)
 
 

@@ -23,7 +23,15 @@ class Main(QMainWindow):
         self.setWindowTitle("AdaptiveCAD Playground (πₐ)")
 
         self.canvas = Canvas()
-        self.controls = Controls(self.canvas.set_params, self.canvas.set_osnap_groups, self.canvas.osnap_groups)
+        self.controls = Controls(
+            self.canvas.set_params,
+            self.canvas.set_osnap_groups,
+            self.canvas.osnap_groups,
+            self.canvas.set_units,
+            self.canvas.units,
+            self.canvas.set_sketch_plane,
+            self.canvas.sketch_plane,
+        )
 
         self.setCentralWidget(self.canvas)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls.dock)

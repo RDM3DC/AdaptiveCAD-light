@@ -1,0 +1,153 @@
+openapi: 3.1.0
+info:
+  title: AdaptiveCAD-Lite
+  version: 0.1.0
+  description: |
+    Prototype API for generating adaptive pi_a geometry, listing available shapes,
+    and returning metadata summaries for ChatGPT integrations.
+servers:
+  - url: https://adaptivecad-lite.yourdomain.com
+    description: Production deployment
+  - url: http://127.0.0.1:8000
+    description: Local development
+paths:
+  /version:
+    get:
+      summary: Return build metadata for AdaptiveCAD-Lite.
+      operationId: getVersion
+      responses:
+        '200':
+          description: Build metadata payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+  /list_shapes:
+    get:
+      summary: List available shape templates.
+      operationId: listShapes
+      responses:
+        '200':
+          description: Array of shape identifiers.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListShapesResponse'
+  /generate_shape:
+    post:
+      summary: Generate a shape artifact.
+      operationId: generateShape
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShapeRequest'
+      responses:
+        '200':
+          description: Shape generation response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShapeResponse'
+        '400':
+          description: Invalid template or output requested.
+  /describe_shape:
+    get:
+      summary: Describe a shape template.
+      operationId: describeShape
+      parameters:
+        - in: query
+          name: shape_type
+          schema:
+            type: string
+          required: true
+          description: Template identifier to describe.
+      responses:
+        '200':
+          description: Shape metadata payload.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShapeDescription'
+        '404':
+          description: Template not found.
+components:
+  schemas:
+    VersionResponse:
+      type: object
+      properties:
+        version:
+          type: string
+          example: '0.1.0'
+        build:
+          type: string
+          example: 'lite'
+        status:
+          type: string
+          example: 'ok'
+        timestamp:
+          type: string
+          format: date-time
+    ListShapesResponse:
+      type: object
+      properties:
+        available_shapes:
+          type: array
+          items:
+            type: string
+          example:
+            - adaptive_disk
+            - pi_a_torus
+            - arp_klein_bottle
+            - curvature_wave
+    ShapeRequest:
+      type: object
+      required:
+        - type
+      properties:
+        type:
+          type: string
+          description: Template identifier for the shape to generate.
+        params:
+          type: object
+          additionalProperties: {}
+          description: Parameter overrides for the template.
+        output:
+          type: string
+          description: Requested artifact format.
+          default: stl
+          enum:
+            - stl
+            - svg
+            - png
+    ShapeResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        params:
+          type: object
+          additionalProperties: {}
+        artifact:
+          type: string
+          format: uri
+        output:
+          type: string
+        status:
+          type: string
+          example: generated
+    ShapeDescription:
+      type: object
+      properties:
+        type:
+          type: string
+        curvature_profile:
+          type: string
+        pi_a_ratio:
+          type: string
+        notes:
+          type: string

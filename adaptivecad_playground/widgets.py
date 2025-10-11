@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -13,6 +14,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen, QPolygonF
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDockWidget,
     QFileDialog,
     QGroupBox,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from adaptive_fields import AdaptiveMetricManager
+from sketch_mode import SketchPlane, lift_polyline
 from geometry import (
     arc_length,
     area,
@@ -198,10 +201,23 @@ class Controls:
         ("dimension", "Dimensions", "Snap to dimension anchors."),
     ]
 
-    def __init__(self, set_params_cb, set_osnap_cb, get_osnap_cb):
+    def __init__(
+        self,
+        set_params_cb,
+        set_osnap_cb,
+        get_osnap_cb,
+        set_units_cb,
+        get_units_cb,
+        set_sketch_plane_cb,
+        get_sketch_plane_cb,
+    ):
         self._set_params_cb = set_params_cb
         self._set_osnap_cb = set_osnap_cb
         self._get_osnap_cb = get_osnap_cb
+        self._set_units_cb = set_units_cb
+        self._get_units_cb = get_units_cb
+        self._set_sketch_plane_cb = set_sketch_plane_cb
+        self._get_sketch_plane_cb = get_sketch_plane_cb
         self.dock = QDockWidget("Parameters")
         self.dock.setObjectName("AdaptiveParamsDock")
         self.dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
@@ -214,10 +230,63 @@ class Controls:
         self._value_labels: Dict[str, QLabel] = {}
         self._slider_widgets: Dict[str, QSlider] = {}
         self._osnap_checks: Dict[str, QCheckBox] = {}
+        self._units_combo: QComboBox = QComboBox()
+        self._sketch_plane_combo: QComboBox = QComboBox()
 
         self._add_slider(layout, "alpha", "α", 0, 100, 0)
         self._add_slider(layout, "mu", "μ", 0, 100, 0)
         self._add_slider(layout, "k0", "k₀", -100, 100, 0)
+
+        units_box = QGroupBox("Units")
+        units_box.setToolTip("Choose how new dimensions format linear measurements.")
+        units_layout = QVBoxLayout()
+        units_layout.setContentsMargins(6, 6, 6, 6)
+        units_layout.setSpacing(6)
+        units_box.setLayout(units_layout)
+
+        self._units_combo.addItem("Inches", "in")
+        self._units_combo.addItem("Millimeters", "mm")
+        self._units_combo.setToolTip("Switch between inch and millimeter outputs for dimensions.")
+        self._units_combo.currentIndexChanged.connect(self._emit_units)
+
+        units_layout.addWidget(self._units_combo)
+        layout.addWidget(units_box)
+
+        current_units = str(self._get_units_cb() or "in").lower()
+        idx = self._units_combo.findData(current_units)
+        if idx < 0:
+            idx = self._units_combo.findData("in")
+        blocked = self._units_combo.blockSignals(True)
+        if idx >= 0:
+            self._units_combo.setCurrentIndex(idx)
+        else:
+            self._units_combo.setCurrentIndex(0)
+        self._units_combo.blockSignals(blocked)
+
+        sketch_box = QGroupBox("Sketch Mode")
+        sketch_box.setToolTip("Tiny sketch layer: plane selection for lathe/revolve workflows.")
+        sketch_layout = QVBoxLayout()
+        sketch_layout.setContentsMargins(6, 6, 6, 6)
+        sketch_layout.setSpacing(6)
+        sketch_box.setLayout(sketch_layout)
+
+        self._sketch_plane_combo.addItem("World XY", SketchPlane.XY.value)
+        self._sketch_plane_combo.addItem("World YZ", SketchPlane.YZ.value)
+        self._sketch_plane_combo.addItem("World ZX", SketchPlane.ZX.value)
+        self._sketch_plane_combo.setToolTip("Choose the sketch plane used when lifting profiles into 3D.")
+        self._sketch_plane_combo.currentIndexChanged.connect(self._emit_sketch_plane)
+
+        sketch_layout.addWidget(self._sketch_plane_combo)
+        layout.addWidget(sketch_box)
+
+        current_plane = str(self._get_sketch_plane_cb() or SketchPlane.XY.value)
+        plane_idx = self._sketch_plane_combo.findData(current_plane)
+        blocked_plane = self._sketch_plane_combo.blockSignals(True)
+        if plane_idx >= 0:
+            self._sketch_plane_combo.setCurrentIndex(plane_idx)
+        else:
+            self._sketch_plane_combo.setCurrentIndex(0)
+        self._sketch_plane_combo.blockSignals(blocked_plane)
 
         snaps_box = QGroupBox("Object Snaps")
         snaps_layout = QVBoxLayout()
@@ -238,6 +307,7 @@ class Controls:
         self.dock.setWidget(host)
         self._emit_params()
         self._emit_osnaps()
+        self._emit_sketch_plane()
 
     def _add_slider(self, layout: QVBoxLayout, key: str, label_text: str, mn: int, mx: int, value: int) -> None:
         label = QLabel(f"{label_text}: {value / 100:.2f}")
@@ -264,6 +334,18 @@ class Controls:
         if key not in self._osnap_checks:
             return
         self._emit_osnaps()
+
+    def _emit_units(self, *_args) -> None:
+        units = self._units_combo.currentData()
+        if units is None:
+            return
+        self._set_units_cb(str(units))
+
+    def _emit_sketch_plane(self, *_args) -> None:
+        plane = self._sketch_plane_combo.currentData()
+        if plane is None:
+            return
+        self._set_sketch_plane_cb(str(plane))
 
     def _emit_params(self) -> None:
         params = {
@@ -306,6 +388,10 @@ class Canvas(QWidget):
         self._shape_counter: int = 1
 
         self._metrics = AdaptiveMetricManager()
+        self._preview_executor = ThreadPoolExecutor(max_workers=2)
+        self._preview_future: Future | None = None
+        self._preview_token: int = 0
+        self._sketch_plane = SketchPlane.XY
 
         # Dimensions
         self._dimensions: List[object] = []
@@ -418,6 +504,43 @@ class Canvas(QWidget):
     def params(self) -> Params:
         return dict(self._params)
 
+    def units(self) -> str:
+        return str(self._dim_style.units or "in")
+
+    def sketch_plane(self) -> str:
+        return self._sketch_plane.value
+
+    def set_sketch_plane(self, plane: str | SketchPlane) -> None:
+        try:
+            target = plane if isinstance(plane, SketchPlane) else SketchPlane(str(plane).upper())
+        except ValueError:
+            return
+        if self._sketch_plane == target:
+            return
+        self._sketch_plane = target
+        self.post_status_message(f"Sketch plane set to {target.value}")
+
+    def set_units(self, units: str) -> None:
+        normalized = (units or "").strip().lower()
+        if normalized not in {"in", "mm"}:
+            return
+        if self.units() == normalized:
+            return
+        self._push_history()
+        self.cancel_curve_preview()
+        self._dim_style.units = normalized
+        for dim in self._dimensions:
+            style = getattr(dim, "style", None)
+            if isinstance(style, DimStyle):
+                style.units = normalized
+            elif hasattr(dim, "style") and hasattr(self._dim_style, "asdict"):
+                copied = DimStyle(**self._dim_style.asdict())
+                copied.units = normalized
+                dim.style = copied
+        message = "Units set to millimeters" if normalized == "mm" else "Units set to inches"
+        self.post_status_message(message)
+        self.update()
+
     def _rebuild_adaptive_fields(self) -> None:
         self._metrics.rebuild(self._shapes)
 
@@ -429,6 +552,57 @@ class Canvas(QWidget):
 
     def pi_a_at(self, point: Point, radius: float, params: Optional[Params] = None) -> float:
         return self._metrics.pi_a(point, radius, params or self._params)
+
+    def adaptive_segment_length(
+        self,
+        p0: Point,
+        p1: Point,
+        params: Optional[Params] = None,
+        *,
+        samples: int = 16,
+    ) -> float:
+        return self._metrics.segment_length(p0, p1, params or self._params, samples=samples)
+
+    def adaptive_polyline_length(
+        self,
+        points: Sequence[Point],
+        params: Optional[Params] = None,
+        *,
+        samples_per_segment: int = 16,
+    ) -> float:
+        return self._metrics.polyline_length(points, params or self._params, samples_per_segment=samples_per_segment)
+
+    def adaptive_curve_length(
+        self,
+        control_points: Sequence[Point],
+        params: Optional[Params] = None,
+        *,
+        samples: int = 256,
+        samples_per_segment: int = 16,
+    ) -> float:
+        return self._metrics.curve_length(
+            control_points,
+            params or self._params,
+            samples=samples,
+            samples_per_segment=samples_per_segment,
+        )
+
+    def adaptive_circle_circumference(
+        self,
+        center: Point,
+        radius: float,
+        params: Optional[Params] = None,
+        *,
+        samples: int = 512,
+        samples_per_segment: int = 8,
+    ) -> float:
+        return self._metrics.circle_circumference(
+            center,
+            radius,
+            params or self._params,
+            samples=samples,
+            samples_per_segment=samples_per_segment,
+        )
 
     # ------------------------------------------------------------------
     # View transforms
@@ -694,6 +868,7 @@ class Canvas(QWidget):
             sample_curvature=self.curvature_at,
             sample_memory=self.memory_at,
             sample_pi_a=lambda pt, radius, params=None: self.pi_a_at(pt, radius, params),
+            adaptive_segment_length=lambda a, b, params=None: self.adaptive_segment_length(a, b, params),
         )
 
     # ------------------------------------------------------------------
@@ -709,19 +884,103 @@ class Canvas(QWidget):
             radius=float(radius),
         )
 
-    def shape_from_curve(self, control_points: Sequence[Point], params: Optional[Params] = None) -> Shape:
+    def shape_from_curve(
+        self,
+        control_points: Sequence[Point],
+        params: Optional[Params] = None,
+        *,
+        samples: int = 256,
+        prefer_gpu: Optional[bool] = None,
+    ) -> Shape:
         params = dict(params or self._params)
-        ctrl = [
-            (float(pt[0]), float(pt[1]))
-            for pt in control_points
-        ]
-        curve_pts = curve_points(ctrl, params, samples=256)
+        ctrl = [(float(pt[0]), float(pt[1])) for pt in control_points]
+        use_gpu = self._metrics.gpu_enabled() if prefer_gpu is None else bool(prefer_gpu)
+        device_hint = self._metrics.gpu_device_hint() if use_gpu else None
+        curve_pts = curve_points(
+            ctrl,
+            params,
+            samples=samples,
+            prefer_gpu=use_gpu,
+            gpu_device=device_hint,
+        )
         return Shape(
             type="piacurve",
             params=params,
             points=curve_pts,
             control_points=ctrl,
         )
+
+    def sketch_profile_world(self, control_points: Sequence[Point]) -> np.ndarray:
+        """Lift 2D sketch points into world space using the active sketch plane."""
+
+        return lift_polyline(control_points, self._sketch_plane)
+
+    def cancel_curve_preview(self) -> None:
+        self._preview_token += 1
+        if self._preview_future is not None and not self._preview_future.done():
+            self._preview_future.cancel()
+        self._preview_future = None
+
+    def request_curve_preview(self, control_points: Sequence[Point]) -> None:
+        ctrl = [(float(pt[0]), float(pt[1])) for pt in control_points]
+        if len(ctrl) < 2:
+            self.cancel_curve_preview()
+            self.clear_temp_shape()
+            return
+
+        params = dict(self._params)
+        quick_pts = curve_points(ctrl, params, samples=64, prefer_gpu=False)
+        quick_shape = Shape(
+            type="piacurve",
+            params=params,
+            points=quick_pts,
+            control_points=ctrl,
+        )
+        self.set_temp_shape(quick_shape, show_status=True)
+
+        self._preview_token += 1
+        token = self._preview_token
+        if self._preview_future is not None and not self._preview_future.done():
+            self._preview_future.cancel()
+
+        prefer_gpu = self._metrics.gpu_enabled()
+        device_hint = self._metrics.gpu_device_hint() if prefer_gpu else None
+
+        def task() -> np.ndarray:
+            return curve_points(
+                ctrl,
+                params,
+                samples=256,
+                prefer_gpu=prefer_gpu,
+                gpu_device=device_hint,
+            )
+
+        future = self._preview_executor.submit(task)
+        self._preview_future = future
+
+        def _on_done(fut: Future) -> None:
+            if fut.cancelled():
+                return
+            try:
+                high_res = fut.result()
+            except Exception:
+                return
+
+            def apply() -> None:
+                if token != self._preview_token:
+                    return
+                shape = Shape(
+                    type="piacurve",
+                    params=params,
+                    points=high_res,
+                    control_points=ctrl,
+                )
+                self._preview_future = None
+                self.set_temp_shape(shape, show_status=False)
+
+            QTimer.singleShot(0, apply)
+
+        future.add_done_callback(_on_done)
 
     def _next_shape_id(self) -> str:
         identifier = f"S{self._shape_counter:04d}"
@@ -765,6 +1024,14 @@ class Canvas(QWidget):
         self._temp_shape = None
         self.update()
         self._emit_selection_status()
+
+    def closeEvent(self, event):  # pragma: no cover - GUI entry point
+        try:
+            self.cancel_curve_preview()
+            self._preview_executor.shutdown(wait=False)
+        except Exception:
+            pass
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     # Selection & status helpers
@@ -1442,11 +1709,19 @@ class Canvas(QWidget):
         }
         sample_point: Optional[Point] = None
         radius_for_pi: Optional[float] = None
+        shape_id = getattr(shape, "id", None)
+        pack = self._metrics.field_pack(shape_id)
+        if pack.has_data():
+            metrics["curvature"] = pack.average_curvature()
+            metrics["memory"] = pack.average_memory()
 
         if shape.type == "piacircle":
             radius = shape.radius or 0.0
             metrics["radius"] = radius
-            metrics["arc_length"] = arc_length(radius, params)
+            if shape.center is not None:
+                metrics["arc_length"] = self.adaptive_circle_circumference(shape.center, radius, params)
+            else:
+                metrics["arc_length"] = arc_length(radius, params)
             metrics["area"] = area(radius, params)
             sample_point = shape.center if shape.center is not None else self._shape_centroid(shape)
             radius_for_pi = radius
@@ -1457,7 +1732,7 @@ class Canvas(QWidget):
             else:
                 span = 0.0
             metrics["radius"] = span / 2.0 if span > 0.0 else 0.0
-            metrics["arc_length"] = curve_arc_length(control_points, params)
+            metrics["arc_length"] = self.adaptive_curve_length(control_points, params)
             if len(control_points) >= 3:
                 metrics["area"] = curve_area(control_points, params)
             sample_point = self._shape_centroid(shape)
@@ -1469,7 +1744,7 @@ class Canvas(QWidget):
             else:
                 span = 0.0
             metrics["radius"] = span / 2.0 if span > 0.0 else 0.0
-            metrics["arc_length"] = polyline_length(pts)
+            metrics["arc_length"] = self.adaptive_polyline_length(pts, params)
             metrics["area"] = polygon_area(pts) if pts.shape[0] >= 3 else None
             sample_point = self._shape_centroid(shape)
             radius_for_pi = max(span, 1e-6) if span > 0.0 else 1.0
@@ -1478,8 +1753,9 @@ class Canvas(QWidget):
             sample_point = self._shape_centroid(shape)
 
         if sample_point is not None:
-            metrics["curvature"] = self.curvature_at(sample_point)
-            metrics["memory"] = self.memory_at(sample_point)
+            if not pack.has_data():
+                metrics["curvature"] = self.curvature_at(sample_point)
+                metrics["memory"] = self.memory_at(sample_point)
             if radius_for_pi is None:
                 radius_for_pi = max(metrics["radius"] or 0.0, 1.0)
             metrics["pi_a"] = self.pi_a_at(sample_point, radius_for_pi, params)
@@ -1612,7 +1888,12 @@ class Canvas(QWidget):
             if dim_id and dim_id in self._selected_dimensions:
                 color = "#3278d7"
             if isinstance(dim, LinearDimension):
-                label = linear_label(dim.p1, dim.p2, style)
+                params = dict(getattr(dim, "params", {}) or self._params)
+                adaptive_length = None
+                mode = getattr(style, "mode", "both")
+                if mode in {"pi_a", "both"}:
+                    adaptive_length = self.adaptive_segment_length(dim.p1, dim.p2, params)
+                label = linear_label(dim.p1, dim.p2, style, adaptive_length=adaptive_length)
                 draw_linear_dim(
                     shim,
                     to_screen,

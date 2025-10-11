@@ -184,6 +184,7 @@ class PiACurveTool(ToolBase):
     def _reset(self):
         self._control_points.clear()
         self._hover_point = None
+        self.canvas.cancel_curve_preview()
         self.canvas.clear_temp_shape()
 
     def _update_preview(self):
@@ -192,6 +193,6 @@ class PiACurveTool(ToolBase):
             candidate.append(self._hover_point)
         if len(candidate) < 2:
             self.canvas.clear_temp_shape()
+            self.canvas.cancel_curve_preview()
             return
-        preview = self.canvas.shape_from_curve(candidate, self.canvas.params())
-        self.canvas.set_temp_shape(preview)
+        self.canvas.request_curve_preview(candidate)

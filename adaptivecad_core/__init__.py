@@ -13,6 +13,7 @@ from .ops import (
     ADAPTIVECAD_OT_add,
     ADAPTIVECAD_OT_cut,
     ADAPTIVECAD_OT_join,
+    ADAPTIVECAD_OT_revolve,
     ADAPTIVECAD_OT_heatmap,
     ADAPTIVECAD_PT_panel,
 )
@@ -21,6 +22,7 @@ classes = (
     ADAPTIVECAD_OT_add,
     ADAPTIVECAD_OT_cut,
     ADAPTIVECAD_OT_join,
+    ADAPTIVECAD_OT_revolve,
     ADAPTIVECAD_OT_heatmap,
     ADAPTIVECAD_PT_panel,
 )

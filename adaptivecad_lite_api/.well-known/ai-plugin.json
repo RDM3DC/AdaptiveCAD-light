@@ -1,0 +1,16 @@
+{
+  "schema_version": "v1",
+  "name_for_human": "AdaptiveCAD Lite",
+  "name_for_model": "adaptivecad_lite",
+  "description_for_human": "Generate and explore adaptive pi_a geometry.",
+  "description_for_model": "Use this tool to design adaptive shapes, pi_a geometry, and ARP structures via simple API calls.",
+  "auth": {
+    "type": "none"
+  },
+  "api": {
+    "type": "openapi",
+    "url": "http://127.0.0.1:8000/openapi.json"
+  },
+  "contact_email": "support@adaptivecad.com",
+  "legal_info_url": "https://adaptivecad.com/terms"
+}

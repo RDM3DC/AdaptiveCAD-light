@@ -1,7 +1,69 @@
-import bpy
+import math
 from math import pi
-from mathutils import Vector
+
 import bmesh
+import bpy
+import numpy as np
+from mathutils import Vector
+
+from .revolve import revolve_adaptive
+
+
+def _ordered_polyline_indices(mesh) -> list[int]:
+    adjacency: dict[int, list[int]] = {i: [] for i in range(len(mesh.vertices))}
+    for edge in mesh.edges:
+        a, b = edge.vertices
+        adjacency[a].append(b)
+        adjacency[b].append(a)
+
+    active = {key: neigh for key, neigh in adjacency.items() if neigh}
+    if not active:
+        return list(range(len(mesh.vertices)))
+
+    endpoints = [idx for idx, neigh in active.items() if len(neigh) == 1]
+    start = endpoints[0] if endpoints else next(iter(active))
+
+    order: list[int] = []
+    visited: set[int] = set()
+    current = start
+    prev: int | None = None
+    max_steps = len(active) * 2
+    steps = 0
+    while True:
+        order.append(current)
+        visited.add(current)
+        steps += 1
+        if steps > max_steps:
+            break
+        neighbors = active.get(current, [])
+        next_candidates = [n for n in neighbors if n != prev]
+        if not next_candidates:
+            break
+        nxt = next_candidates[0]
+        if nxt in visited:
+            order.append(nxt)
+            break
+        prev, current = current, nxt
+
+    # Append any isolated vertices (no edges) or leftovers
+    leftovers = [idx for idx in range(len(mesh.vertices)) if idx not in order]
+    return order + leftovers
+
+
+def _extract_profile_world(obj, depsgraph):
+    mesh = obj.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+    if mesh is None or len(mesh.vertices) == 0:
+        return None
+    try:
+        order = _ordered_polyline_indices(mesh)
+        world = obj.matrix_world
+        verts_world = [world @ mesh.vertices[idx].co for idx in order]
+        coords = np.array([[v.x, v.y, v.z] for v in verts_world], dtype=float)
+        if coords.shape[0] >= 2 and np.allclose(coords[0], coords[-1]):
+            coords = coords[:-1]
+        return coords
+    finally:
+        obj.to_mesh_clear()
 
 # --- πₐ kernel hook (replace with your real field) ---
 def pi_a(p: Vector) -> float:
@@ -130,6 +192,147 @@ class ADAPTIVECAD_OT_join(bpy.types.Operator):
             p = 0.5 * (v0 + v1)
             data[e.index].value = float(abs(pi_a(p) - pi))
 
+        return {'FINISHED'}
+
+
+class ADAPTIVECAD_OT_revolve(bpy.types.Operator):
+    bl_idname = "adaptivecad.revolve"
+    bl_label = "Adaptive Revolve (πₐ)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    axis_mode: bpy.props.EnumProperty(
+        name="Axis",
+        description="Axis of revolution in world space",
+        items=[
+            ('X', "X", "Use the global X axis"),
+            ('Y', "Y", "Use the global Y axis"),
+            ('Z', "Z", "Use the global Z axis"),
+        ],
+        default='Z',
+    )
+    angle: bpy.props.FloatProperty(
+        name="Angle (deg)",
+        description="Revolve sweep angle in degrees",
+        default=360.0,
+        min=1.0,
+        max=360.0,
+    )
+    theta_offset: bpy.props.FloatProperty(
+        name="θ Offset (deg)",
+        description="Initial seam angle offset in degrees",
+        default=0.0,
+        min=0.0,
+        max=360.0,
+    )
+    tolerance: bpy.props.FloatProperty(
+        name="Chord Tol",
+        description="Maximum chord error per ring",
+        default=0.001,
+        min=1e-6,
+    )
+    eta_k: bpy.props.FloatProperty(
+        name="ηκ",
+        description="Curvature weighting for adaptive θ",
+        default=0.4,
+        min=0.0,
+        max=4.0,
+    )
+    eta_m: bpy.props.FloatProperty(
+        name="ηM",
+        description="Memory weighting for adaptive θ",
+        default=0.3,
+        min=0.0,
+        max=4.0,
+    )
+    smart_seam: bpy.props.BoolProperty(
+        name="Smart Seam",
+        description="Sample seam candidates and pick the lowest energy",
+        default=True,
+    )
+    cap_start: bpy.props.BoolProperty(
+        name="Cap Start",
+        description="Cap profile start if it touches the axis",
+        default=True,
+    )
+    cap_end: bpy.props.BoolProperty(
+        name="Cap End",
+        description="Cap profile end if it touches the axis",
+        default=True,
+    )
+    keep_profile: bpy.props.BoolProperty(
+        name="Keep Profile",
+        description="Keep the source profile visible after revolve",
+        default=True,
+    )
+
+    def execute(self, ctx):
+        obj = ctx.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "Active object must be a mesh profile (polyline)")
+            return {'CANCELLED'}
+
+        depsgraph = ctx.evaluated_depsgraph_get()
+        profile = _extract_profile_world(obj, depsgraph)
+        if profile is None or profile.shape[0] < 2:
+            self.report({'ERROR'}, "Profile requires at least two connected vertices")
+            return {'CANCELLED'}
+
+        axis_point = np.array(obj.matrix_world.translation, dtype=float)
+        axis_map = {
+            'X': np.array([1.0, 0.0, 0.0], dtype=float),
+            'Y': np.array([0.0, 1.0, 0.0], dtype=float),
+            'Z': np.array([0.0, 0.0, 1.0], dtype=float),
+        }
+        axis_dir = axis_map.get(self.axis_mode, axis_map['Z'])
+
+        sweep_angle = math.radians(max(1.0, float(self.angle)))
+        theta0 = math.radians(float(self.theta_offset))
+        tol = max(1e-6, float(self.tolerance))
+
+        try:
+            result = revolve_adaptive(
+                profile_pts=profile,
+                axis_point=axis_point,
+                axis_dir=axis_dir,
+                angle=sweep_angle,
+                theta0=theta0,
+                tol=tol,
+                eta_k=float(self.eta_k),
+                eta_m=float(self.eta_m),
+                fields=None,
+                smart_seam=bool(self.smart_seam),
+                cap_start=bool(self.cap_start),
+                cap_end=bool(self.cap_end),
+            )
+        except Exception as exc:
+            self.report({'ERROR'}, f"Revolve failed: {exc}")
+            return {'CANCELLED'}
+
+        verts = result.vertices.tolist()
+        faces = [tuple(face) for face in result.faces.tolist()]
+        mesh_name = f"{obj.name}_revolve"
+        mesh = bpy.data.meshes.new(mesh_name)
+        mesh.from_pydata(verts, [], faces)
+        mesh.update(calc_edges=True, calc_edges_loose=True)
+        for poly in mesh.polygons:
+            poly.use_smooth = True
+
+        revolve_obj = bpy.data.objects.new(mesh_name, mesh)
+        ctx.collection.objects.link(revolve_obj)
+
+        for ob in ctx.selected_objects:
+            ob.select_set(False)
+        revolve_obj.select_set(True)
+        ctx.view_layer.objects.active = revolve_obj
+
+        revolve_obj["theta0"] = float(result.theta0)
+        revolve_obj["theta_segments"] = int(result.segments)
+
+        if not self.keep_profile:
+            obj.hide_set(True)
+            obj.select_set(False)
+
+        self.report({'INFO'}, f"Revolve created '{revolve_obj.name}' with {result.segments} θ segments")
         return {'FINISHED'}
 
 # --- HEATMAP: bake edge float attribute to vertex color and material ---
@@ -276,6 +479,7 @@ class ADAPTIVECAD_PT_panel(bpy.types.Panel):
         col.operator("adaptivecad.add", text="Add πₐ Primitive")
         col.operator("adaptivecad.cut", text="Cut (πₐ)")
         col.operator("adaptivecad.join", text="Join (Curvature Blend)")
+        col.operator("adaptivecad.revolve", text="Revolve (πₐ)")
 
         box = self.layout.box()
         box.label(text="Heatmap")

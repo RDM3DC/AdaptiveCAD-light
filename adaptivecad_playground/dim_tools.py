@@ -5,6 +5,7 @@ Integrate by forwarding mouse events from your Canvas to the active tool.
 """
 
 from __future__ import annotations
+import math
 from typing import Tuple, Optional, Callable, List, Any
 from dataclasses import dataclass
 from dimensions import LinearDimension, RadialDimension, AngularDimension, DimStyle, linear_label, radial_label, angular_label
@@ -25,6 +26,7 @@ class ToolContext:
     sample_curvature: Callable[[Point], float]
     sample_memory: Callable[[Point], float]
     sample_pi_a: Callable[[Point, float, Optional[dict]], float]
+    adaptive_segment_length: Callable[[Point, Point, Optional[dict]], float]
 
 class DimLinearTool:
     def __init__(self, ctx: ToolContext):
@@ -44,9 +46,18 @@ class DimLinearTool:
         else:
             self.offset = p
             style = self.ctx.get_style()
-            lab = linear_label(self.p1, self.p2, style)
+            params_copy = dict(self.ctx.get_params())
+            adaptive = self.ctx.adaptive_segment_length(self.p1, self.p2, params_copy)
+            lab = linear_label(self.p1, self.p2, style, adaptive_length=adaptive)
             did = f"D{abs(hash((self.p1,self.p2,self.offset)))%10**6}"
-            dim = LinearDimension(id=did, p1=self.p1, p2=self.p2, offset=self.offset, style=DimStyle(**style.asdict()))
+            dim = LinearDimension(
+                id=did,
+                p1=self.p1,
+                p2=self.p2,
+                offset=self.offset,
+                style=DimStyle(**style.asdict()),
+                params=params_copy,
+            )
             self.ctx.add_dimension(dim)
             self.ctx.update_status(f"LinearDim: {lab}")
             # reset
@@ -167,6 +178,7 @@ class MeasureTool:
     def __init__(self, ctx: ToolContext):
         self.ctx = ctx
         self.last: Optional[str] = None
+        self.anchor: Optional[Point] = None
 
     def mouse_move(self, ev):
         p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
@@ -174,19 +186,30 @@ class MeasureTool:
         curvature = self.ctx.sample_curvature(p)
         memory = self.ctx.sample_memory(p)
         pia_value = self.ctx.sample_pi_a(p, 1.0, params)
-        self.ctx.update_status(
-            f"X={p[0]:.3f}, Y={p[1]:.3f}, kappa≈{curvature:.4f}, pi_a≈{pia_value:.4f}, memory≈{memory:.4f}"
-        )
+        summary = f"X={p[0]:.3f}, Y={p[1]:.3f}, kappa≈{curvature:.4f}, pi_a≈{pia_value:.4f}, memory≈{memory:.4f}"
+        if self.anchor is not None:
+            euclid = math.dist(self.anchor, p)
+            adaptive = self.ctx.adaptive_segment_length(self.anchor, p, params)
+            summary += f", L≈{euclid:.3f}, Lₐ≈{adaptive:.3f}"
+        self.ctx.update_status(summary)
 
     def mouse_press(self, ev):
+        p, _ = osnap_pick(self.ctx.world_from_event(ev), self.ctx.osnap_targets())
+        self.anchor = p
         return None
 
     def mouse_release(self, ev):
         return None
 
     def key_press(self, ev):
+        key = getattr(ev, "key", None)
+        if callable(key):
+            key = key()
+        if key in (27,):  # Esc key
+            self.anchor = None
         return None
 
     def deactivate(self):
         self.last = None
+        self.anchor = None
         self.ctx.update_status("")
