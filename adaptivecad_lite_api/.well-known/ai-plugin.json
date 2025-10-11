@@ -9,8 +9,9 @@
   },
   "api": {
     "type": "openapi",
-    "url": "http://127.0.0.1:8000/openapi.json"
+    "url": "https://rdm3dc-adaptivecad-lite.hf.space/openapi.json"
   },
+  "logo_url": "https://rdm3dc-adaptivecad-lite.hf.space/logo.png",
   "contact_email": "support@adaptivecad.com",
   "legal_info_url": "https://adaptivecad.com/terms"
 }

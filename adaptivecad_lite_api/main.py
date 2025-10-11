@@ -4,12 +4,17 @@ from __future__ import annotations
 from datetime import datetime
 import uuid
 from typing import Any, Dict, List
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 APP_VERSION = "0.1.0"
 APP_BUILD = "lite"
+
+ICON_PATH = Path(__file__).resolve().parents[1] / "icon1.png"
+MANIFEST_PATH = Path(__file__).resolve().parent / ".well-known" / "ai-plugin.json"
 
 app = FastAPI(
     title="AdaptiveCAD Lite API",
@@ -125,3 +130,21 @@ async def describe_shape(shape_type: str) -> ShapeDescription:
     if description is None:
         raise HTTPException(status_code=404, detail=f"No description for '{shape_type}'.")
     return description
+
+
+@app.get("/logo.png", include_in_schema=False)
+async def get_logo() -> FileResponse:
+    """Serve the main logo asset for plugin manifests."""
+
+    if not ICON_PATH.exists():
+        raise HTTPException(status_code=404, detail="Logo asset not found.")
+    return FileResponse(str(ICON_PATH), media_type="image/png")
+
+
+@app.get("/.well-known/ai-plugin.json", include_in_schema=False)
+async def get_manifest() -> FileResponse:
+    """Serve the ChatGPT manifest from the deployment root."""
+
+    if not MANIFEST_PATH.exists():
+        raise HTTPException(status_code=404, detail="Manifest not found.")
+    return FileResponse(str(MANIFEST_PATH), media_type="application/json")
