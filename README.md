@@ -1,3 +1,14 @@
+---
+title: AdaptiveCAD Lite API
+emoji: 🌀
+colorFrom: blue
+colorTo: purple
+sdk: docker
+sdk_version: "latest"
+app_file: app.py
+pinned: false
+---
+
 # AdaptiveCAD Playground (πₐ)
 
 Interactive PySide6 sandbox for experimenting with curvature-adaptive geometry. Draw πₐ-driven circles and Bezier-like curves, tweak parameters live, and export the scene.
@@ -19,6 +30,15 @@ python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
 python adaptivecad_playground/app.py
+```
+
+### Command Line Demo
+
+Generate an adaptive revolve from the canonical vase profile:
+
+```powershell
+python -m adaptivecad_core.cli list-profiles
+python -m adaptivecad_core.cli revolve --profile vase_profile --output adaptive_revolve.obj
 ```
 
 ### Optional: Enable GPU Acceleration
