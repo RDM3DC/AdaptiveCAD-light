@@ -57,9 +57,10 @@ from dimensions import (
 from dim_draw import draw_linear_dim, draw_radial_dim, draw_angular_dim
 from dim_tools import ToolContext, DimAngularTool, DimLinearTool, DimRadialTool, MeasureTool
 from osnap import osnap_pick
-from sora_background import BGMode, SoraBackground
+from sora_background import BGMode, PanelTheme, SoraBackground, panel_theme_for
 from sora_hud import HudTheme, SoraHud
 from tools import PiACircleTool, PiACurveTool, SelectTool
+from curved_widgets import CurvedViewportOverlay
 
 Point = Tuple[float, float]
 Params = Dict[str, float]
@@ -223,15 +224,18 @@ class Controls:
         self.dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.dock.setToolTip("Parameters: adjust α, μ, and k₀ to reshape πₐ responses.")
         host = QWidget()
+        host.setObjectName("AdaptiveControlsHost")
         layout = QVBoxLayout(host)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
+        self._host_widget = host
         self._value_labels: Dict[str, QLabel] = {}
         self._slider_widgets: Dict[str, QSlider] = {}
         self._osnap_checks: Dict[str, QCheckBox] = {}
         self._units_combo: QComboBox = QComboBox()
         self._sketch_plane_combo: QComboBox = QComboBox()
+        self._panel_theme: PanelTheme | None = None
 
         self._add_slider(layout, "alpha", "α", 0, 100, 0)
         self._add_slider(layout, "mu", "μ", 0, 100, 0)
@@ -305,6 +309,7 @@ class Controls:
 
         layout.addStretch(1)
         self.dock.setWidget(host)
+        self.apply_panel_theme(panel_theme_for(BGMode.GRADIENT))
         self._emit_params()
         self._emit_osnaps()
         self._emit_sketch_plane()
@@ -358,6 +363,86 @@ class Controls:
     def _emit_osnaps(self) -> None:
         states = {key: checkbox.isChecked() for key, checkbox in self._osnap_checks.items()}
         self._set_osnap_cb(states)
+
+    def set_panel_mode(self, mode: BGMode) -> None:
+        self.apply_panel_theme(panel_theme_for(mode))
+
+    def apply_panel_theme(self, theme: PanelTheme) -> None:
+        if theme is None:
+            return
+        if self._panel_theme == theme:
+            return
+        self._panel_theme = theme
+
+        top = theme.top.name()
+        bottom = theme.bottom.name()
+        text = theme.text.name()
+        border = theme.border.name()
+        accent = theme.accent.name()
+        gradient = f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {top}, stop:1 {bottom})"
+
+        host_lines = [
+            "#AdaptiveControlsHost {",
+            f"    background: {gradient};",
+            f"    color: {text};",
+            "}",
+            "#AdaptiveControlsHost QLabel,",
+            "#AdaptiveControlsHost QCheckBox,",
+            "#AdaptiveControlsHost QComboBox,",
+            "#AdaptiveControlsHost QGroupBox,",
+            "#AdaptiveControlsHost QSlider {",
+            f"    color: {text};",
+            "}",
+            "#AdaptiveControlsHost QGroupBox {",
+            f"    border: 1px solid {border};",
+            "    margin-top: 10px;",
+            "}",
+            "#AdaptiveControlsHost QGroupBox::title {",
+            f"    color: {text};",
+            "    subcontrol-origin: margin;",
+            "    left: 8px;",
+            "    padding: 0 4px;",
+            "}",
+            "#AdaptiveControlsHost QCheckBox::indicator {",
+            "    width: 14px;",
+            "    height: 14px;",
+            f"    border: 1px solid {border};",
+            "    background: rgba(255, 255, 255, 25);",
+            "}",
+            "#AdaptiveControlsHost QCheckBox::indicator:checked {",
+            f"    background: {accent};",
+            "}",
+            "#AdaptiveControlsHost QSlider::groove:horizontal {",
+            f"    border: 1px solid {border};",
+            "    height: 6px;",
+            "    background: rgba(0, 0, 0, 60);",
+            "}",
+            "#AdaptiveControlsHost QSlider::handle:horizontal {",
+            "    width: 14px;",
+            "    margin: -4px 0;",
+            f"    background: {accent};",
+            f"    border: 1px solid {border};",
+            "}",
+            "#AdaptiveControlsHost QComboBox {",
+            f"    border: 1px solid {border};",
+            "    padding: 2px 6px;",
+            "    background-color: rgba(255, 255, 255, 18);",
+            "}",
+        ]
+        self._host_widget.setStyleSheet("\n".join(host_lines))
+
+        dock_lines = [
+            "QDockWidget#AdaptiveParamsDock {",
+            f"    background: {gradient};",
+            f"    color: {text};",
+            "}",
+            "QDockWidget#AdaptiveParamsDock::title {",
+            f"    background: {top};",
+            f"    color: {text};",
+            "    padding-left: 8px;",
+            "}",
+        ]
+        self.dock.setStyleSheet("\n".join(dock_lines))
 
 
 class Canvas(QWidget):
@@ -454,6 +539,14 @@ class Canvas(QWidget):
         self._anim_timer.timeout.connect(self.update)
         self._anim_timer.start()
         self._load_visual_config()
+
+        self._curved_ui_enabled = True
+        self.overlay = CurvedViewportOverlay(self, get_params=self.params)
+        self.overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.overlay.setGeometry(self.rect())
+        self.overlay.raise_()
+        self.overlay.show()
+        self._overlay_last_sample = None  # type: Optional[tuple[float, float, float]]
 
         self._emit_default_status()
         self.dimensions_visibility_changed.emit(self._show_dimensions)
@@ -749,6 +842,55 @@ class Canvas(QWidget):
         self.bg.set_mode(mode)
         self.update()
 
+    def curved_ui_enabled(self) -> bool:
+        return bool(self._curved_ui_enabled)
+
+    def set_curved_ui_enabled(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if self._curved_ui_enabled == enabled:
+            return
+        self._curved_ui_enabled = enabled
+        overlay = getattr(self, "overlay", None)
+        if overlay is not None:
+            overlay.setVisible(enabled)
+            if enabled:
+                overlay.raise_()
+        if not enabled:
+            self._overlay_last_sample = None
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Curved UI overlay helpers
+    def _nudge_overlay_activity(self, input_energy: float) -> None:
+        if not self._curved_ui_enabled:
+            return
+        overlay = getattr(self, "overlay", None)
+        if overlay is None or not overlay.isVisible():
+            return
+        overlay.adapt(input_energy=max(0.0, min(1.0, float(input_energy))))
+
+    def _update_overlay_activity(self, event) -> None:
+        if not self._curved_ui_enabled:
+            return
+        overlay = getattr(self, "overlay", None)
+        if overlay is None or not overlay.isVisible():
+            return
+        pos = event.position() if hasattr(event, "position") else event.posF()
+        now = time.monotonic()
+        x = float(pos.x()) if hasattr(pos, "x") else float(pos[0])
+        y = float(pos.y()) if hasattr(pos, "y") else float(pos[1])
+        last_sample = self._overlay_last_sample
+        if last_sample is not None:
+            prev_time, px, py = last_sample
+            dt = max(now - prev_time, 1e-3)
+            speed = math.hypot(x - px, y - py) / dt
+            # Map pixel-per-second speed into [0,1]
+            energy = max(0.0, min(1.0, speed / 600.0))
+        else:
+            energy = 0.2
+        overlay.adapt(input_energy=energy)
+        self._overlay_last_sample = (now, x, y)
+
     # ------------------------------------------------------------------
     # Snap/grid control
     def set_snap_to_grid(self, enabled: bool) -> None:
@@ -835,6 +977,7 @@ class Canvas(QWidget):
         self._tool_name = name
         self.post_status_message("")
         self.tool_changed.emit(name)
+        self._nudge_overlay_activity(0.35)
         self.setFocus()
         self.update()
 
@@ -2103,6 +2246,14 @@ class Canvas(QWidget):
 
     # ------------------------------------------------------------------
     # Event forwarding to the active tool
+    def resizeEvent(self, event):  # pragma: no cover - GUI layout handling
+        super().resizeEvent(event)
+        overlay = getattr(self, "overlay", None)
+        if overlay is not None:
+            overlay.setGeometry(self.rect())
+            if self._curved_ui_enabled:
+                overlay.raise_()
+
     def wheelEvent(self, event):  # pragma: no cover - GUI entry point
         if event.modifiers() & Qt.ControlModifier:
             delta = event.angleDelta().y()
@@ -2118,22 +2269,28 @@ class Canvas(QWidget):
         super().wheelEvent(event)
 
     def mousePressEvent(self, event):  # pragma: no cover - GUI entry point
+        self._nudge_overlay_activity(0.5)
         if self._dispatch_pointer_event("mouse_press", event):
             return
         if self._tool is not None:
             self._tool.mouse_press(event)
 
     def mouseMoveEvent(self, event):  # pragma: no cover - GUI entry point
+        self._nudge_overlay_activity(0.5)
+        self._update_overlay_activity(event)
         if self._dispatch_pointer_event("mouse_move", event):
             return
         if self._tool is not None:
             self._tool.mouse_move(event)
 
+        self._update_overlay_activity(event)
     def mouseReleaseEvent(self, event):  # pragma: no cover - GUI entry point
+        self._nudge_overlay_activity(0.2)
         if self._dispatch_pointer_event("mouse_release", event):
             return
         if self._tool is not None:
             self._tool.mouse_release(event)
+        self._nudge_overlay_activity(0.2)
 
     def keyPressEvent(self, event):  # pragma: no cover - GUI entry point
         if self._handle_zoom_shortcut(event):

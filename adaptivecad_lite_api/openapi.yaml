@@ -1,153 +1,674 @@
 openapi: 3.1.0
 info:
-  title: AdaptiveCAD-Lite
-  version: 0.1.0
+  title: AdaptiveCAD API (Full)
+  version: 0.9.0
   description: |
-    Prototype API for generating adaptive pi_a geometry, listing available shapes,
-    and returning metadata summaries for ChatGPT integrations.
+    Full REST API for AdaptiveCAD (πₐ), exposing sketches, solids, fields,
+    edit operations, analysis, exports, and async jobs with SSE streaming.
 servers:
-  - url: https://adaptivecad-lite.yourdomain.com
-    description: Production deployment
-  - url: http://127.0.0.1:8000
-    description: Local development
+  - url: http://127.0.0.1:8100
+    description: Local dev
+  - url: https://api.adaptivecad.example.com
+    description: Production
+security:
+  - BearerAuth: []
 paths:
   /version:
     get:
-      summary: Return build metadata for AdaptiveCAD-Lite.
+      summary: Build/version metadata
       operationId: getVersion
       responses:
         '200':
-          description: Build metadata payload.
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VersionResponse'
-  /list_shapes:
+                $ref: '#/components/schemas/VersionInfo'
+  /health:
     get:
-      summary: List available shape templates.
-      operationId: listShapes
+      summary: Liveness probe
+      operationId: health
       responses:
         '200':
-          description: Array of shape identifiers.
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ListShapesResponse'
-  /generate_shape:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    example: true
+  /shapes/generate:
     post:
-      summary: Generate a shape artifact.
+      summary: Generate a parametric primitive/curve (πₐ circle, curve, etc.)
       operationId: generateShape
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ShapeRequest'
+              $ref: '#/components/schemas/GenerateShapeRequest'
       responses:
         '200':
-          description: Shape generation response.
+          description: Generated shape descriptor and artifact reference
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ShapeResponse'
-        '400':
-          description: Invalid template or output requested.
-  /describe_shape:
+                $ref: '#/components/schemas/GeneratedShape'
+  /sketches:
+    post:
+      summary: Create a new 2D sketch/canvas
+      operationId: createSketch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSketchRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
     get:
-      summary: Describe a shape template.
-      operationId: describeShape
+      summary: List sketches
+      operationId: listSketches
       parameters:
         - in: query
-          name: shape_type
-          schema:
-            type: string
-          required: true
-          description: Template identifier to describe.
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: cursor
+          schema: { type: string }
       responses:
         '200':
-          description: Shape metadata payload.
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ShapeDescription'
-        '404':
-          description: Template not found.
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/Sketch' }
+                  nextCursor:
+                    type: string
+                    nullable: true
+  /sketches/{sketchId}:
+    get:
+      summary: Get a sketch by id
+      operationId: getSketch
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+    delete:
+      summary: Delete a sketch
+      operationId: deleteSketch
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Deleted
+  /sketches/{sketchId}/entities:
+    post:
+      summary: Add entities (line/arc/bezier/circle/polyline) to a sketch
+      operationId: addEntities
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddEntitiesRequest'
+      responses:
+        '200':
+          description: Updated sketch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /sketches/{sketchId}/edit/join:
+    post:
+      summary: Join nearby segments/polylines by endpoint tolerance
+      operationId: joinEntities
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/JoinRequest'
+      responses:
+        '200':
+          description: Updated sketch with joined chains
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /sketches/{sketchId}/edit/break:
+    post:
+      summary: Break a segment/polyline at a picked point
+      operationId: breakEntity
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BreakRequest'
+      responses:
+        '200':
+          description: Updated sketch with broken segments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /sketches/{sketchId}/edit/trim:
+    post:
+      summary: Trim target segment(s) to the nearest cutter intersection
+      operationId: trimEntities
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrimRequest'
+      responses:
+        '200':
+          description: Updated sketch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /sketches/{sketchId}/edit/extend:
+    post:
+      summary: Extend target segment(s) until meeting a boundary curve
+      operationId: extendEntities
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtendRequest'
+      responses:
+        '200':
+          description: Updated sketch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /sketches/{sketchId}/boolean:
+    post:
+      summary: 2D polygon boolean (add/cut/intersect); uses Shapely if available
+      operationId: sketchBoolean
+      parameters:
+        - in: path
+          name: sketchId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SketchBooleanRequest'
+      responses:
+        '200':
+          description: Updated sketch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sketch'
+  /solids/revolve:
+    post:
+      summary: Create a solid by revolving a profile around an axis
+      operationId: revolve
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RevolveRequest'
+      responses:
+        '202':
+          description: Accepted job for revolve generation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+  /solids/extrude:
+    post:
+      summary: Create a solid by extruding a profile
+      operationId: extrude
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExtrudeRequest'
+      responses:
+        '202':
+          description: Accepted job for extrusion
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+  /solids/boolean:
+    post:
+      summary: 3D boolean operations on solids
+      operationId: solidBoolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolidBooleanRequest'
+      responses:
+        '202':
+          description: Accepted job for boolean op
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+  /analysis/measure:
+    post:
+      summary: Measure length/area/volume/curvature/πₐ at sample points
+      operationId: measure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeasureRequest'
+      responses:
+        '200':
+          description: Measurements
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeasureResponse'
+  /fields/sample:
+    post:
+      summary: Sample curvature/memory/πₐ fields on a grid or along a path
+      operationId: sampleFields
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FieldSampleRequest'
+      responses:
+        '200':
+          description: Field samples
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldSampleResponse'
+  /export:
+    post:
+      summary: Export selected entities/solids to OBJ/STL/STEP/PNG/JSON/BLEND
+      operationId: export
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+      responses:
+        '200':
+          description: Artifact created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Artifact'
+  /jobs:
+    post:
+      summary: Create a background job (used by solids/booleans/exports)
+      operationId: createJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJobRequest'
+      responses:
+        '202':
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+    get:
+      summary: List jobs
+      operationId: listJobs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Job' }
+  /jobs/{jobId}:
+    get:
+      summary: Get job status/result
+      operationId: getJob
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Job'
+  /jobs/{jobId}/events:
+    get:
+      summary: Stream job progress via SSE
+      operationId: streamJob
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: "event: progress\ndata: { \"pct\": 42 }\n\n"
 components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
   schemas:
-    VersionResponse:
+    VersionInfo:
       type: object
       properties:
+        app:
+          type: string
+          example: adaptivecad
         version:
           type: string
-          example: '0.1.0'
+          example: 0.9.0
         build:
           type: string
-          example: 'lite'
-        status:
-          type: string
-          example: 'ok'
+          example: full
         timestamp:
           type: string
           format: date-time
-    ListShapesResponse:
+    GenerateShapeRequest:
+      type: object
+      required: [type, params]
+      properties:
+        type:
+          type: string
+          enum: [pi_a_circle, pi_a_curve]
+        params:
+          type: object
+          additionalProperties: true
+        output:
+          type: string
+          enum: [json, obj, png]
+          default: json
+    GeneratedShape:
       type: object
       properties:
-        available_shapes:
+        id: { type: string }
+        type: { type: string }
+        params: { type: object }
+        artifact: { $ref: '#/components/schemas/Artifact' }
+    CreateSketchRequest:
+      type: object
+      properties:
+        name: { type: string, default: "sketch-1" }
+        units: { type: string, enum: [mm, inch], default: mm }
+        grid: { type: number, default: 1.0 }
+    Sketch:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        units: { type: string }
+        entities:
+          type: array
+          items: { $ref: '#/components/schemas/Entity' }
+    Entity:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [line, arc, bezier, circle, polyline]
+        # Minimal coordinates to keep schema compact
+        p:
+          type: array
+          description: Control points / endpoints (2D)
+          items:
+            type: array
+            items: { type: number }
+            minItems: 2
+            maxItems: 2
+    AddEntitiesRequest:
+      type: object
+      properties:
+        entities:
+          type: array
+          items: { $ref: '#/components/schemas/Entity' }
+    JoinRequest:
+      type: object
+      properties:
+        selectionIds:
+          type: array
+          items: { type: string }
+        tolerance:
+          type: number
+          default: 1e-4
+    BreakRequest:
+      type: object
+      properties:
+        entityId: { type: string }
+        point:
+          type: array
+          items: { type: number }
+          minItems: 2
+          maxItems: 2
+    TrimRequest:
+      type: object
+      properties:
+        targetIds:
+          type: array
+          items: { type: string }
+        cutterId: { type: string }
+    ExtendRequest:
+      type: object
+      properties:
+        targetIds:
+          type: array
+          items: { type: string }
+        boundaryId: { type: string }
+    SketchBooleanRequest:
+      type: object
+      properties:
+        op:
+          type: string
+          enum: [add, cut, intersect]
+        subjects:
+          type: array
+          items: { type: string }
+        tools:
+          type: array
+          items: { type: string }
+    RevolveRequest:
+      type: object
+      required: [profile, axis, angle]
+      properties:
+        profile:
+          $ref: '#/components/schemas/Sketch'
+        axis:
+          type: object
+          properties:
+            origin: { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
+            direction: { type: array, items: { type: number }, minItems: 3, maxItems: 3 }
+        angle:
+          type: number
+          description: Degrees to revolve (0..360)
+        segments:
+          type: integer
+          description: θ sampling for the adaptive revolve
+          default: 128
+    ExtrudeRequest:
+      type: object
+      required: [profile, height]
+      properties:
+        profile:
+          $ref: '#/components/schemas/Sketch'
+        height: { type: number }
+        direction: { type: array, items: { type: number }, minItems: 3, maxItems: 3, default: [0,0,1] }
+    SolidBooleanRequest:
+      type: object
+      properties:
+        op:
+          type: string
+          enum: [union, difference, intersection]
+        a: { type: string, description: Solid A id }
+        b: { type: string, description: Solid B id }
+    MeasureRequest:
+      type: object
+      properties:
+        queries:
           type: array
           items:
-            type: string
-          example:
-            - adaptive_disk
-            - pi_a_torus
-            - arp_klein_bottle
-            - curvature_wave
-    ShapeRequest:
-      type: object
-      required:
-        - type
-      properties:
-        type:
-          type: string
-          description: Template identifier for the shape to generate.
-        params:
-          type: object
-          additionalProperties: {}
-          description: Parameter overrides for the template.
-        output:
-          type: string
-          description: Requested artifact format.
-          default: stl
-          enum:
-            - stl
-            - svg
-            - png
-    ShapeResponse:
+            type: object
+            properties:
+              kind: { type: string, enum: [length, area, volume, curvature, pi_a] }
+              entityId: { type: string }
+              at:
+                type: array
+                items: { type: number }
+                minItems: 3
+                maxItems: 3
+    MeasureResponse:
       type: object
       properties:
-        id:
-          type: string
-          format: uuid
-        type:
-          type: string
-        params:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              kind: { type: string }
+              value: { type: number }
+              units: { type: string }
+    FieldSampleRequest:
+      type: object
+      properties:
+        space: { type: string, enum: [2d, 3d], default: 2d }
+        grid:
           type: object
-          additionalProperties: {}
-        artifact:
+          properties:
+            origin: { type: array, items: { type: number } }
+            size: { type: array, items: { type: number } }
+            steps: { type: array, items: { type: integer } }
+        path:
+          type: array
+          items:
+            type: array
+            items: { type: number }
+    FieldSampleResponse:
+      type: object
+      properties:
+        samples:
+          type: array
+          items:
+            type: object
+            properties:
+              pos:
+                type: array
+                items: { type: number }
+              kappa: { type: number }
+              pi_a: { type: number }
+              memory: { type: number }
+    ExportRequest:
+      type: object
+      required: [selection, format]
+      properties:
+        selection:
+          type: array
+          items: { type: string }
+        format:
           type: string
-          format: uri
-        output:
-          type: string
+          enum: [obj, stl, step, png, json, blend]
+        options:
+          type: object
+          additionalProperties: true
+    Artifact:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [file, url] }
+        filename: { type: string }
+        url: { type: string }
+        size: { type: integer }
+        mime: { type: string }
+    CreateJobRequest:
+      type: object
+      properties:
+        kind: { type: string }
+        payload: { type: object }
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        kind: { type: string }
         status:
           type: string
-          example: generated
-    ShapeDescription:
-      type: object
-      properties:
-        type:
-          type: string
-        curvature_profile:
-          type: string
-        pi_a_ratio:
-          type: string
-        notes:
-          type: string
+          enum: [queued, running, completed, failed]
+        progress:
+          type: number
+        result:
+          anyOf:
+            - { $ref: '#/components/schemas/Artifact' }
+            - { type: object }

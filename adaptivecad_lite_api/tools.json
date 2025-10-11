@@ -1,0 +1,159 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "create_sketch",
+      "description": "Create a new 2D sketch",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "units": {
+            "type": "string",
+            "enum": [
+              "mm",
+              "inch"
+            ]
+          },
+          "grid": {
+            "type": "number"
+          }
+        },
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "add_entities",
+      "description": "Add entities (line/arc/bezier/circle/polyline) to a sketch",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "sketch_id": {
+            "type": "string"
+          },
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "line",
+                    "arc",
+                    "bezier",
+                    "circle",
+                    "polyline"
+                  ]
+                },
+                "p": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "p"
+              ]
+            }
+          }
+        },
+        "required": [
+          "sketch_id",
+          "entities"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "revolve",
+      "description": "Create a solid by revolving a 2D profile around an axis",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "profile": {
+            "type": "object"
+          },
+          "axis": {
+            "type": "object",
+            "properties": {
+              "origin": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              },
+              "direction": {
+                "type": "array",
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
+            "required": [
+              "origin",
+              "direction"
+            ]
+          },
+          "angle": {
+            "type": "number",
+            "default": 360
+          }
+        },
+        "required": [
+          "profile",
+          "axis",
+          "angle"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "export_selection",
+      "description": "Export selected entities/solids to a file (OBJ/STL/STEP/PNG/JSON/BLEND)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selection": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "obj",
+              "stl",
+              "step",
+              "png",
+              "json",
+              "blend"
+            ]
+          },
+          "options": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "selection",
+          "format"
+        ]
+      }
+    }
+  }
+]

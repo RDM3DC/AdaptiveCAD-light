@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 APP_VERSION = "0.1.0"
@@ -15,12 +16,16 @@ APP_BUILD = "lite"
 
 ICON_PATH = Path(__file__).resolve().parents[1] / "icon1.png"
 MANIFEST_PATH = Path(__file__).resolve().parent / ".well-known" / "ai-plugin.json"
+WELL_KNOWN_DIR = Path(__file__).resolve().parent / ".well-known"
 
 app = FastAPI(
     title="AdaptiveCAD Lite API",
     version=APP_VERSION,
     description="Generate adaptive pi_a and ARP geometry via lightweight endpoints.",
 )
+
+if WELL_KNOWN_DIR.exists():
+    app.mount("/.well-known", StaticFiles(directory=str(WELL_KNOWN_DIR)), name="well-known")
 
 
 class ShapeRequest(BaseModel):
@@ -71,6 +76,12 @@ AVAILABLE_SHAPES: Dict[str, ShapeDescription] = {
         pi_a_ratio="Oscillation respects pi_a cadence across segments.",
         notes="params.length and params.amplitude control the wave envelope.",
     ),
+    "adaptive_mobius": ShapeDescription(
+        type="adaptive_mobius",
+        curvature_profile="π-adaptive Möbius band with Lorentz/complex projections.",
+        pi_a_ratio="Kappa parameter controls π-adaptive curvature warping.",
+        notes="Use params.tau, params.kappa, params.proj_mode for morphing.",
+    ),
 }
 
 SUPPORTED_OUTPUTS = {"stl", "svg", "png"}
@@ -106,20 +117,66 @@ async def list_shapes() -> Dict[str, List[str]]:
 
 @app.post("/generate_shape")
 async def generate_shape(req: ShapeRequest) -> Dict[str, Any]:
-    """Stubbed geometry generator; returns deterministic metadata for now."""
-
+    """Generate geometry using π-adaptive algorithms."""
+    import tempfile
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    
     _validate_request(req)
     shape_id = str(uuid.uuid4())
-    artifact_path = f"https://adaptivecad.com/assets/{shape_id}.{req.output}"
-
-    return {
-        "id": shape_id,
-        "type": req.type,
-        "params": req.params,
-        "artifact": artifact_path,
-        "output": req.output,
-        "status": "generated",
-    }
+    
+    if req.type == "adaptive_mobius":
+        from adaptive_mobius_unity import adaptive_mobius_unity, save_obj, write_binary_stl
+        
+        # Extract parameters with defaults
+        params = req.params
+        vertices, faces = adaptive_mobius_unity(
+            radius_mm=params.get("radius_mm", 40.0),
+            half_width_mm=params.get("half_width_mm", 8.0),
+            twists=params.get("twists", 1.5),
+            gamma=params.get("gamma", 0.25),
+            tau=params.get("tau", 0.5),
+            proj_mode=params.get("proj_mode", "hybrid"),
+            thickness_mm=params.get("thickness_mm", 2.0),
+            kappa=params.get("kappa", 0.0),
+            samples_major=params.get("samples_major", 480),
+            samples_width=params.get("samples_width", 48),
+        )
+        
+        # Export to temp file based on format
+        with tempfile.NamedTemporaryFile(suffix=f".{req.output}", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            if req.output == "obj":
+                save_obj(tmp_path, vertices, faces)
+            elif req.output == "stl":
+                write_binary_stl(tmp_path, vertices, faces)
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported output format: {req.output}")
+        
+        # For HF deployment, you'd upload tmp_path to blob storage and return public URL
+        artifact_path = f"https://adaptivecad.com/assets/{shape_id}.{req.output}"  # placeholder
+        
+        return {
+            "id": shape_id,
+            "type": req.type,
+            "params": req.params,
+            "artifact": artifact_path,
+            "output": req.output,
+            "status": "generated",
+            "vertices": len(vertices),
+            "faces": len(faces),
+        }
+    else:
+        # Fallback for other shapes (still stubbed)
+        artifact_path = f"https://adaptivecad.com/assets/{shape_id}.{req.output}"
+        return {
+            "id": shape_id,
+            "type": req.type,
+            "params": req.params,
+            "artifact": artifact_path,
+            "output": req.output,
+            "status": "generated",
+        }
 
 
 @app.get("/describe_shape")

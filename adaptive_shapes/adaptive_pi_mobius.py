@@ -1,0 +1,92 @@
+import numpy as np
+from pathlib import Path
+
+OUTPUT_OBJ = Path(__file__).with_name("adaptive_pi_mobius.obj")
+
+
+def adaptive_pi_mobius(
+    radius=40.0,
+    half_width=8.0,
+    twists=1.5,
+    gamma=0.25,
+    samples_major=720,
+    samples_width=64,
+    tau=0.5,
+    proj_mode="hybrid",
+    kappa=0.1,
+):
+    """Adaptive Möbius with Euclidean/Lorentz/Complex projection blend and πₐ-like curvature warp.
+
+    kappa controls a gentle adaptive curvature modulation across width/angle.
+    """
+
+    u = np.linspace(0, 2*np.pi, samples_major, endpoint=True)
+    v = np.linspace(-half_width, half_width, samples_width)
+    uu, vv = np.meshgrid(u, v)
+    uu, vv = uu.T, vv.T
+
+    # 4D time-like coordinate for Lorentz projection
+    t4 = gamma * np.sin(uu * twists / 2.0)
+
+    # Base Euclidean Möbius coordinates
+    x = (radius + vv * np.cos(twists * uu / 2)) * np.cos(uu)
+    y = (radius + vv * np.cos(twists * uu / 2)) * np.sin(uu)
+    z = vv * np.sin(twists * uu / 2)
+
+    # πₐ-inspired curvature warp: modulate radial offset and height by kappa and tau
+    warp = 1.0 + kappa * (0.5 + 0.5 * np.sin(uu * twists) * np.cos(np.pi * vv / (2*half_width + 1e-9)))
+    x *= warp
+    y *= warp
+    z *= (1.0 + 0.5 * kappa * np.sin(uu * twists / 2.0))
+
+    # Projection blend
+    if proj_mode == "euclidean":
+        x3, y3, z3 = x, y, z
+    elif proj_mode == "lorentz":
+        x3 = x * np.cosh(t4) - z * np.sinh(t4)
+        y3 = y
+        z3 = z * np.cosh(t4) - x * np.sinh(t4)
+    elif proj_mode == "complex":
+        phase = np.exp(1j * uu * twists)
+        x3 = np.real(x + phase * 0.4)
+        y3 = np.imag(y + phase * 0.4)
+        z3 = z + np.real(phase) * 0.2
+    else:
+        phase = np.exp(1j * uu * twists)
+        xE, yE, zE = x, y, z
+        xL = x * np.cosh(t4) - z * np.sinh(t4)
+        yL = y
+        zL = z * np.cosh(t4) - x * np.sinh(t4)
+        xC = np.real(x + phase * 0.4)
+        yC = np.imag(y + phase * 0.4)
+        zC = z + np.real(phase) * 0.2
+        x3 = (1 - tau) * xE + tau * 0.5 * (xL + xC)
+        y3 = (1 - tau) * yE + tau * 0.5 * (yL + yC)
+        z3 = (1 - tau) * zE + tau * 0.5 * (zL + zC)
+
+    vertices = np.column_stack([x3.ravel(), y3.ravel(), z3.ravel()])
+    faces = []
+    for i in range(samples_major - 1):
+        for j in range(samples_width - 1):
+            a = i * samples_width + j
+            b = a + 1
+            c = a + samples_width
+            d = c + 1
+            faces.append((a, b, d))
+            faces.append((a, d, c))
+
+    return vertices, faces
+
+
+def save_obj(path, vertices, faces):
+    with open(path, "w", encoding="utf-8") as f:
+        for vx, vy, vz in vertices:
+            f.write(f"v {vx:.6f} {vy:.6f} {vz:.6f}\n")
+        for a, b, c in faces:
+            f.write(f"f {a+1} {b+1} {c+1}\n")
+
+
+if __name__ == "__main__":
+    v, f = adaptive_pi_mobius(tau=0.75, proj_mode="hybrid", kappa=0.1)
+    save_obj(OUTPUT_OBJ, v, f)
+    print(f"Saved adaptive Möbius to {OUTPUT_OBJ}")

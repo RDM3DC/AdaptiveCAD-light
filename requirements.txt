@@ -1,2 +1,6 @@
 PySide6==6.9.3
 numpy==2.3.3
+pydantic==2.12.0
+mcp==1.17.0
+fastapi==0.115.0
+uvicorn==0.33.0

@@ -1,0 +1,1 @@
+"""AdaptiveCAD MCP server package."""

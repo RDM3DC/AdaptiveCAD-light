@@ -21,6 +21,9 @@ class Main(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AdaptiveCAD Playground (πₐ)")
+        app_icon = Path(__file__).resolve().parents[1] / "icon1.png"
+        if app_icon.exists():
+            self.setWindowIcon(QIcon(str(app_icon)))
 
         self.canvas = Canvas()
         self.controls = Controls(
@@ -35,6 +38,7 @@ class Main(QMainWindow):
 
         self.setCentralWidget(self.canvas)
         self.addDockWidget(Qt.RightDockWidgetArea, self.controls.dock)
+        self.controls.set_panel_mode(self.canvas.background_mode())
 
         self._status_labels: dict[str, QLabel] = {}
         self._tool_actions: dict[str, QAction] = {}
@@ -42,6 +46,7 @@ class Main(QMainWindow):
         self._dims_action: QAction | None = None
         self._pointer_actions: dict[str, QAction] = {}
         self._hud_action: QAction | None = None
+        self._curved_ui_action: QAction | None = None
         self._bg_actions: dict[BGMode, QAction] = {}
         self._bg_action_group: QActionGroup | None = None
         self._sora_client = Sora2Client(Sora2Config(api_key=os.getenv("SORA2_API_KEY")))
@@ -221,6 +226,15 @@ class Main(QMainWindow):
         view_menu.addAction(hud_action)
         self._hud_action = hud_action
 
+        curved_action = QAction("Show Curved UI", self)
+        curved_action.setCheckable(True)
+        curved_action.setChecked(self.canvas.curved_ui_enabled())
+        curved_action.triggered.connect(self._toggle_curved_ui)
+        curved_action.setToolTip("Toggle the adaptive curved overlay.")
+        curved_action.setStatusTip("Toggle the adaptive curved overlay.")
+        view_menu.addAction(curved_action)
+        self._curved_ui_action = curved_action
+
         bg_menu = view_menu.addMenu(self._load_icon("bg_toggle.svg"), "Background Mode")
         bg_menu.setToolTip("Choose the adaptive background style.")
         bg_menu.setStatusTip("Choose the adaptive background style.")
@@ -237,6 +251,7 @@ class Main(QMainWindow):
             self._bg_actions[mode] = action
         self._sync_background_menu()
         self._sync_hud_menu()
+        self._sync_curved_ui_menu()
 
         view_menu.addSeparator()
 
@@ -262,6 +277,10 @@ class Main(QMainWindow):
         self.canvas.set_hud_enabled(bool(checked))
         self._sync_hud_menu()
 
+    def _toggle_curved_ui(self, checked: bool) -> None:
+        self.canvas.set_curved_ui_enabled(bool(checked))
+        self._sync_curved_ui_menu()
+
     def _handle_background_action(self, checked: bool, mode: BGMode) -> None:
         if not checked:
             return
@@ -269,6 +288,7 @@ class Main(QMainWindow):
 
     def _set_background_mode(self, mode: BGMode) -> None:
         self.canvas.set_background_mode(mode)
+        self.controls.set_panel_mode(mode)
         self._sync_background_menu()
 
     def _sync_background_menu(self) -> None:
@@ -286,6 +306,13 @@ class Main(QMainWindow):
         prev = self._hud_action.blockSignals(True)
         self._hud_action.setChecked(self.canvas.hud_enabled())
         self._hud_action.blockSignals(prev)
+
+    def _sync_curved_ui_menu(self) -> None:
+        if not self._curved_ui_action:
+            return
+        prev = self._curved_ui_action.blockSignals(True)
+        self._curved_ui_action.setChecked(self.canvas.curved_ui_enabled())
+        self._curved_ui_action.blockSignals(prev)
 
     # ------------------------------------------------------------------
     # Event handlers

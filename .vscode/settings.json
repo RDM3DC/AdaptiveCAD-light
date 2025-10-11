@@ -1,0 +1,14 @@
+{
+    "github.copilot.chat.mcpServers": {
+        "adaptivecad": {
+            "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "args": [
+                "-m",
+                "adaptivecad_mcp_server",
+                "--transport",
+                "stdio"
+            ],
+            "cwd": "${workspaceFolder}"
+        }
+    }
+}
