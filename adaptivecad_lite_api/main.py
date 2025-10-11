@@ -148,3 +148,18 @@ async def get_manifest() -> FileResponse:
     if not MANIFEST_PATH.exists():
         raise HTTPException(status_code=404, detail="Manifest not found.")
     return FileResponse(str(MANIFEST_PATH), media_type="application/json")
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> Dict[str, Any]:
+    """Return a lightweight service descriptor for the home page."""
+
+    return {
+        "name": "AdaptiveCAD Lite API",
+        "version": APP_VERSION,
+        "build": APP_BUILD,
+        "status": "ok",
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+        "manifest": "/.well-known/ai-plugin.json",
+    }
