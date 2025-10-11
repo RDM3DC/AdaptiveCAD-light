@@ -15,4 +15,4 @@ COPY . .
 
 # Hugging Face Spaces expect the app to listen on $PORT
 ENV PORT=7860
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["uvicorn", "adaptivecad_lite_api.main:app", "--host", "0.0.0.0", "--port", "7860"]
